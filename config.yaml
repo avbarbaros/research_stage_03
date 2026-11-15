@@ -180,6 +180,8 @@ E3_2:
     bootstrap_samples: 2000
     alpha: 0.05
     examples_per_family: 25       # CoT-loss examples (direct right, CoT wrong) saved for reading
+    rescore: true                 # re-apply the current answer parser to saved outputs at analysis time
+    min_reasoning_words: 15       # an output "contains reasoning" if it has at least this many words of prose
 
   # Prompt templates, one pair per answer kind.
   #   mc:   {question} {options}        (ScienceQA, MathVista multiple choice)
@@ -207,5 +209,9 @@ E3_2:
     bbox:
       direct: |-
         Locate "{question}" in the image and output its bbox coordinates in JSON format.
+      # The plain "think step by step" variant was ignored in the 30-item check (CoT output = bare JSON,
+      # identical to direct). This version asks for written reasoning before the JSON.
       cot: |-
-        Locate "{question}" in the image. First think step by step about which object the description refers to (its category, attributes and position relative to other objects). Then output its bbox coordinates in JSON format.
+        Locate "{question}" in the image.
+        Before giving the box, reason step by step in plain sentences: list the objects in the image that could match the description, and explain which one matches its category, attributes and position relative to other objects.
+        Only after this reasoning, output the bbox coordinates of the matching object in JSON format.

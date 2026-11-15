@@ -51,6 +51,7 @@ CONDITIONS = ["direct", "cot"]
 # Generation
 # =============================================================================
 def run_family_condition(family: str, condition: str, items, vlm, cfg: dict, run_dir: Path) -> float:
+    from common.parsing import reasoning_words
     from common.tasks import render_prompt, score
     from common.vlm import GenParams, Request
 
@@ -78,6 +79,7 @@ def run_family_condition(family: str, condition: str, items, vlm, cfg: dict, run
                 raw_output=o.text,
                 out_tokens=o.n_tokens,
                 finish_reason=o.finish_reason,
+                reasoning_words=reasoning_words(o.text),
                 **score(it, o.text, thr),
             )
             rows.append(row)
@@ -103,14 +105,27 @@ def analyze(cfg: dict, run_dir: Path) -> dict:
         raise SystemExit("E3_2 analysis expects exactly two conditions (baseline + one other)")
     alt = other[0]
 
-    summary: dict = {"run_dir": str(run_dir), "model": cfg["common"]["model"]["name"], "baseline": base, "alt": alt, "families": {}}
+    rescore = bool(acfg.get("rescore", True))
+    thr = float(ecfg.get("iou_threshold", 0.5))
+    min_words = int(acfg.get("min_reasoning_words", 15))
+    summary: dict = {"run_dir": str(run_dir), "model": cfg["common"]["model"]["name"], "baseline": base, "alt": alt,
+                     "min_reasoning_words": min_words, "families": {}}
     csv_rows = []
+    failures = open(run_dir / "parse_failures.jsonl", "w", encoding="utf-8")
     for fam in ecfg["families"]:
-        p_base = {r["id"]: r for r in read_jsonl(run_dir / f"preds_{fam}_{base}.jsonl")}
-        p_alt = {r["id"]: r for r in read_jsonl(run_dir / f"preds_{fam}_{alt}.jsonl")}
+        p_base, rs_b = _load(run_dir / f"preds_{fam}_{base}.jsonl", rescore, thr)
+        p_alt, rs_a = _load(run_dir / f"preds_{fam}_{alt}.jsonl", rescore, thr)
         ids = sorted(set(p_base) & set(p_alt))
         if not ids:
             continue
+        for cond, preds in ((base, p_base), (alt, p_alt)):
+            for i in ids:
+                r = preds[i]
+                if r["pred"] is None:
+                    failures.write(json.dumps({"family": fam, "condition": cond, "id": i, "answer_type": r["answer_type"],
+                                               "gold": r["gold"], "choices": r.get("choices"),
+                                               "finish_reason": r.get("finish_reason"), "raw_output": r["raw_output"]},
+                                              ensure_ascii=False) + "\n")
         a = [bool(p_base[i]["correct"]) for i in ids]
         b = [bool(p_alt[i]["correct"]) for i in ids]
         mc = mcnemar_exact(a, b)
@@ -120,8 +135,9 @@ def analyze(cfg: dict, run_dir: Path) -> dict:
         entry = {
             "dataset": p_base[ids[0]]["dataset"],
             "n": len(ids),
-            base: _cond_stats([p_base[i] for i in ids], alpha),
-            alt: _cond_stats([p_alt[i] for i in ids], alpha),
+            "rescored_changed": {base: rs_b, alt: rs_a},
+            base: _cond_stats([p_base[i] for i in ids], alpha, min_words),
+            alt: _cond_stats([p_alt[i] for i in ids], alpha, min_words),
             "diff": diff,
             "diff_ci": [dlo, dhi],
             **mc,
@@ -170,6 +186,7 @@ def analyze(cfg: dict, run_dir: Path) -> dict:
                  int(bool(p_base[i]["correct"])), int(bool(p_alt[i]["correct"])), p_alt[i]["out_tokens"]]
             )
 
+    failures.close()
     dump_json(summary, run_dir / "summary.json")
     (run_dir / "summary.md").write_text(_markdown(summary), encoding="utf-8")
     with open(run_dir / "per_item.csv", "w", newline="", encoding="utf-8") as f:
@@ -179,7 +196,31 @@ def analyze(cfg: dict, run_dir: Path) -> dict:
     return summary
 
 
-def _cond_stats(recs: list[dict], alpha: float) -> dict:
+def _load(path: Path, rescore: bool, thr: float) -> tuple[dict, int]:
+    """Read predictions; if possible re-score raw outputs with the current parser.
+
+    Returns ({id: row}, number of rows whose correctness changed by re-scoring)."""
+    from common.parsing import reasoning_words
+    from common.tasks import item_from_row, score
+
+    rows = {r["id"]: r for r in read_jsonl(path)}
+    changed = 0
+    for r in rows.values():
+        if "reasoning_words" not in r:
+            r["reasoning_words"] = reasoning_words(r["raw_output"])
+        if not rescore:
+            continue
+        item = item_from_row(r)
+        if item is None:
+            continue
+        new = score(item, r["raw_output"], thr)
+        if bool(new["correct"]) != bool(r["correct"]):
+            changed += 1
+        r.update(new)
+    return rows, changed
+
+
+def _cond_stats(recs: list[dict], alpha: float, min_words: int = 15) -> dict:
     from common.metrics import accuracy, wilson_ci
 
     corr = [bool(r["correct"]) for r in recs]
@@ -190,6 +231,8 @@ def _cond_stats(recs: list[dict], alpha: float) -> dict:
         "parse_rules": _counts(r["parse_rule"] for r in recs),
         "truncated_rate": accuracy([r.get("finish_reason") == "length" for r in recs]),
         "mean_out_tokens": sum(r["out_tokens"] for r in recs) / len(recs),
+        # share of outputs that contain prose reasoning (>= min_words words outside code / JSON)
+        "reasoned_rate": accuracy([r["reasoning_words"] >= min_words for r in recs]),
     }
     if "iou" in recs[0]:
         st["mean_iou"] = sum(r.get("iou") or 0.0 for r in recs) / len(recs)
@@ -216,8 +259,8 @@ def _markdown(s: dict) -> str:
         "",
         "## Direct vs CoT by task family",
         "",
-        f"| family | dataset | n | {base} % (95% CI) | {alt} % (95% CI) | Δ pp | Δ 95% CI | gains / losses | McNemar p | verdict | losses from {alt} parse fail / truncation | parse fail % ({base} / {alt}) | {alt} truncated % | mean {alt} tok |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        f"| family | dataset | n | {base} % (95% CI) | {alt} % (95% CI) | Δ pp | Δ 95% CI | gains / losses | McNemar p | verdict | losses from {alt} parse fail / truncation | parse fail % ({base} / {alt}) | {alt} truncated % | mean {alt} tok | {alt} outputs with reasoning % |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for fam, e in s["families"].items():
         b, c = e[base], e[alt]
@@ -226,8 +269,14 @@ def _markdown(s: dict) -> str:
             f"{_pct(c['acc'])} ({_pct(c['ci'][0])}–{_pct(c['ci'][1])}) | {100 * e['diff']:+.2f} | "
             f"{100 * e['diff_ci'][0]:+.2f} to {100 * e['diff_ci'][1]:+.2f} | {e['gains']} / {e['losses']} | {e['p_value']:.3g} | "
             f"**{e['verdict']}** | {e['losses_alt_parse_fail']} / {e['losses_alt_truncated']} | "
-            f"{_pct(b['parse_fail_rate'])} / {_pct(c['parse_fail_rate'])} | {_pct(c['truncated_rate'])} | {c['mean_out_tokens']:.0f} |"
+            f"{_pct(b['parse_fail_rate'])} / {_pct(c['parse_fail_rate'])} | {_pct(c['truncated_rate'])} | {c['mean_out_tokens']:.0f} | "
+            f"{_pct(c['reasoned_rate'])} |"
         )
+    weak = [f for f, e in s["families"].items() if e[alt]["reasoned_rate"] < 0.9]
+    if weak:
+        L += ["", f"**Warning:** fewer than 90% of `{alt}` outputs contain reasoning (≥ {s['min_reasoning_words']} words of prose) in: "
+              + ", ".join(f"{f} ({_pct(s['families'][f][alt]['reasoned_rate'])}%)" for f in weak)
+              + ". For these families the comparison does not test reasoning."]
     hurt = [(f, e) for f, e in s["families"].items() if e["verdict"] == "hurts"]
     L += ["", "**Families where CoT significantly reduces accuracy:** " + (
         ", ".join(f"{f} ({100 * e['diff']:+.2f} pp, p = {e['p_value']:.2g})" for f, e in hurt) if hurt else "none"
@@ -245,7 +294,9 @@ def _markdown(s: dict) -> str:
         L.append("")
     L += [
         "Verdict: exact McNemar test on paired correctness; *helps*/*hurts* when p < alpha, else *neutral*. "
-        "Subgroup p-values are not corrected for multiple comparisons.",
+        "Subgroup p-values are not corrected for multiple comparisons. "
+        "Outputs are re-scored with the current parser at analysis time (`rescored_changed` in summary.json); "
+        "unparsed outputs are listed in `parse_failures.jsonl`.",
         "",
     ]
     return "\n".join(L)

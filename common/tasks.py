@@ -58,8 +58,31 @@ class TaskItem:
             "answer_type": self.answer_type,
             "gold": self.gold,
             "question": self.question,
+            # everything score() needs, so saved outputs can be re-scored without the dataset
+            "choices": self.choices,
+            "precision": self.precision,
+            "fmt": self.fmt,
             **self.extra,
         }
+
+
+_EXTRA_KEYS = ("orig_w", "orig_h", "model_w", "model_h")
+
+
+def item_from_row(row: dict) -> "TaskItem | None":
+    """Rebuild the scoring-relevant part of an item from a saved prediction row.
+
+    Returns None for rows written before choices/precision were stored
+    (they cannot be re-scored and keep their original score)."""
+    if "precision" not in row or (row["answer_type"] == "mc" and not row.get("choices")):
+        return None
+    if row["answer_type"] == "bbox" and not all(k in row for k in _EXTRA_KEYS):
+        return None
+    return TaskItem(
+        id=row["id"], family=row["family"], dataset=row["dataset"], row=row["row"], question=row["question"],
+        answer_type=row["answer_type"], gold=row["gold"], choices=row.get("choices"), precision=int(row["precision"]),
+        fmt=row.get("fmt", ""), subgroup=row["subgroup"], extra={k: row[k] for k in _EXTRA_KEYS if k in row},
+    )
 
 
 # =============================================================================

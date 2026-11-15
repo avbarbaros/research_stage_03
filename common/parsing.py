@@ -24,6 +24,15 @@ _BARE = re.compile(r"^\s*\**\(?\s*([A-J])\s*\)?\**\s*[.\)]?\s*$")
 _LEADING = re.compile(r"^\s*\**\(?([A-J])(?:\)|\.|:)\s+")
 
 
+# LaTeX-style final answers, e.g. "\\boxed{B}" or "\\boxed{(B) 145°}" (common in maths CoT).
+_BOXED = re.compile(r"\\boxed\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}")
+
+
+def last_boxed(text: str) -> str | None:
+    hits = _BOXED.findall(text or "")
+    return hits[-1].strip() if hits else None
+
+
 def extract_choice(text: str, choices: list[str]) -> tuple[str | None, str]:
     """Return (letter or None, rule name)."""
     n = len(choices)
@@ -36,6 +45,16 @@ def extract_choice(text: str, choices: list[str]) -> tuple[str | None, str]:
     hits = [h for h in hits if h in valid]
     if hits:
         return hits[-1], "explicit"
+
+    boxed = last_boxed(t)
+    if boxed is not None:
+        m = re.match(r"^\(?\s*([A-J])\s*\)?(?![A-Za-z])", boxed)
+        if m and m.group(1).upper() in valid:
+            return m.group(1).upper(), "boxed"
+        low = boxed.lower()
+        found = [i for i, c in enumerate(choices) if c and c.strip().lower() == low]
+        if len(found) == 1:
+            return LETTERS[found[0]], "boxed"
 
     m = _BARE.match(t)
     if m and m.group(1).upper() in valid:
@@ -81,6 +100,9 @@ def answer_span(text: str) -> tuple[str, str]:
     """
     if text is None:
         return "", "none"
+    boxed = last_boxed(text)
+    if boxed is not None:
+        return boxed, "explicit"
     hits = list(_ANSWER_IS.finditer(text))
     if hits:
         span = hits[-1].group(1).split("\n")[0].strip()
@@ -101,7 +123,8 @@ def _to_float(tok: str) -> float | None:
 
 def parse_number(text: str, prefer: str = "first") -> float | None:
     """First (or last) number in text; digits first, then number words."""
-    toks = _NUM.findall(text or "")
+    text = re.sub(r"\\[dt]?frac\{([^{}]+)\}\{([^{}]+)\}", r"\1/\2", text or "")
+    toks = _NUM.findall(text)
     vals = [v for v in (_to_float(t) for t in toks) if v is not None]
     if vals:
         return vals[0] if prefer == "first" else vals[-1]
@@ -172,3 +195,14 @@ def iou(a: list[float], b: list[float]) -> float:
     inter = ix * iy
     union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
     return inter / union if union > 0 else 0.0
+
+
+def reasoning_words(text: str) -> int:
+    """Words of prose in an output once code blocks, JSON and boxes are removed.
+
+    Used to check that a CoT prompt actually produced reasoning: a grounding
+    model may answer a "think step by step" prompt with the bare JSON box.
+    """
+    t = re.sub(r"```.*?```", " ", text or "", flags=re.DOTALL)
+    t = re.sub(r"\[[^\[\]]*\]|\{[^{}]*\}", " ", t)
+    return len(re.findall(r"[A-Za-z]{2,}", t))
