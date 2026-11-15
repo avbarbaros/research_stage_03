@@ -186,6 +186,8 @@ def extract_bbox(text: str) -> tuple[list[float] | None, str]:
             except ValueError:
                 continue
             return [min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)], rule
+    if re.search(r"\[\s*\]", text or ""):
+        return None, "empty"   # the model output an empty box list: "no object matches"
     return None, "none"
 
 
@@ -206,3 +208,21 @@ def reasoning_words(text: str) -> int:
     t = re.sub(r"```.*?```", " ", text or "", flags=re.DOTALL)
     t = re.sub(r"\[[^\[\]]*\]|\{[^{}]*\}", " ", t)
     return len(re.findall(r"[A-Za-z]{2,}", t))
+
+
+# An unparsed output that explicitly declines to answer ("none of the options",
+# "not listed", an empty box list, "N/A") rather than failing to follow the format.
+_REFUSAL = re.compile(
+    r"none of the (?:provided |given |listed )?(?:options|choices|above)"
+    r"|(?:is|are) not (?:explicitly |directly )?(?:listed|among|provided|included|in the options)"
+    r"|not (?:explicitly |directly )?(?:listed|provided) (?:in|among)"
+    r"|no (?:object|objects|option|options|one) (?:in the image )?(?:that )?(?:match|matches|appear)"
+    r"|cannot be (?:determined|answered|selected)"
+    r"|```json\s*\[\s*\]\s*```"
+    r"|^\s*n/?a\s*\.?\s*$",
+    re.IGNORECASE,
+)
+
+
+def looks_like_refusal(text: str) -> bool:
+    return bool(_REFUSAL.search(text or ""))

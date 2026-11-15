@@ -105,6 +105,8 @@ def analyze(cfg: dict, run_dir: Path) -> dict:
         raise SystemExit("E3_2 analysis expects exactly two conditions (baseline + one other)")
     alt = other[0]
 
+    from common.parsing import looks_like_refusal
+
     rescore = bool(acfg.get("rescore", True))
     thr = float(ecfg.get("iou_threshold", 0.5))
     min_words = int(acfg.get("min_reasoning_words", 15))
@@ -123,6 +125,7 @@ def analyze(cfg: dict, run_dir: Path) -> dict:
                 r = preds[i]
                 if r["pred"] is None:
                     failures.write(json.dumps({"family": fam, "condition": cond, "id": i, "answer_type": r["answer_type"],
+                                               "refusal": looks_like_refusal(r["raw_output"]),
                                                "gold": r["gold"], "choices": r.get("choices"),
                                                "finish_reason": r.get("finish_reason"), "raw_output": r["raw_output"]},
                                               ensure_ascii=False) + "\n")
@@ -144,6 +147,8 @@ def analyze(cfg: dict, run_dir: Path) -> dict:
             "verdict": verdict(diff, mc["p_value"], alpha),
             # A CoT "loss" caused by an unparseable CoT answer is a format failure, not a reasoning failure.
             "losses_alt_parse_fail": sum(p_alt[i]["pred"] is None for i in losses),
+            # ... of which the model explicitly declined ("no object matches", "none of the options")
+            "losses_alt_refusal": sum(p_alt[i]["pred"] is None and looks_like_refusal(p_alt[i]["raw_output"]) for i in losses),
             "losses_alt_truncated": sum(p_alt[i].get("finish_reason") == "length" for i in losses),
             "subgroups": {},
         }
@@ -222,12 +227,14 @@ def _load(path: Path, rescore: bool, thr: float) -> tuple[dict, int]:
 
 def _cond_stats(recs: list[dict], alpha: float, min_words: int = 15) -> dict:
     from common.metrics import accuracy, wilson_ci
+    from common.parsing import looks_like_refusal
 
     corr = [bool(r["correct"]) for r in recs]
     st = {
         "acc": accuracy(corr),
         "ci": list(wilson_ci(corr, alpha)),
         "parse_fail_rate": accuracy([r["pred"] is None for r in recs]),
+        "refusal_rate": accuracy([r["pred"] is None and looks_like_refusal(r["raw_output"]) for r in recs]),
         "parse_rules": _counts(r["parse_rule"] for r in recs),
         "truncated_rate": accuracy([r.get("finish_reason") == "length" for r in recs]),
         "mean_out_tokens": sum(r["out_tokens"] for r in recs) / len(recs),
@@ -259,8 +266,8 @@ def _markdown(s: dict) -> str:
         "",
         "## Direct vs CoT by task family",
         "",
-        f"| family | dataset | n | {base} % (95% CI) | {alt} % (95% CI) | Δ pp | Δ 95% CI | gains / losses | McNemar p | verdict | losses from {alt} parse fail / truncation | parse fail % ({base} / {alt}) | {alt} truncated % | mean {alt} tok | {alt} outputs with reasoning % |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        f"| family | dataset | n | {base} % (95% CI) | {alt} % (95% CI) | Δ pp | Δ 95% CI | gains / losses | McNemar p | verdict | {alt} losses with no answer (refusals) / truncated | no answer % ({base} / {alt}) | refusals % ({base} / {alt}) | {alt} truncated % | mean {alt} tok | outputs with reasoning % ({base} / {alt}) |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for fam, e in s["families"].items():
         b, c = e[base], e[alt]
@@ -268,9 +275,9 @@ def _markdown(s: dict) -> str:
             f"| {fam} | {e['dataset']} | {e['n']} | {_pct(b['acc'])} ({_pct(b['ci'][0])}–{_pct(b['ci'][1])}) | "
             f"{_pct(c['acc'])} ({_pct(c['ci'][0])}–{_pct(c['ci'][1])}) | {100 * e['diff']:+.2f} | "
             f"{100 * e['diff_ci'][0]:+.2f} to {100 * e['diff_ci'][1]:+.2f} | {e['gains']} / {e['losses']} | {e['p_value']:.3g} | "
-            f"**{e['verdict']}** | {e['losses_alt_parse_fail']} / {e['losses_alt_truncated']} | "
-            f"{_pct(b['parse_fail_rate'])} / {_pct(c['parse_fail_rate'])} | {_pct(c['truncated_rate'])} | {c['mean_out_tokens']:.0f} | "
-            f"{_pct(c['reasoned_rate'])} |"
+            f"**{e['verdict']}** | {e['losses_alt_parse_fail']} ({e.get('losses_alt_refusal', 0)}) / {e['losses_alt_truncated']} | "
+            f"{_pct(b['parse_fail_rate'])} / {_pct(c['parse_fail_rate'])} | {_pct(b['refusal_rate'])} / {_pct(c['refusal_rate'])} | {_pct(c['truncated_rate'])} | {c['mean_out_tokens']:.0f} | "
+            f"{_pct(b['reasoned_rate'])} / {_pct(c['reasoned_rate'])} |"
         )
     weak = [f for f, e in s["families"].items() if e[alt]["reasoned_rate"] < 0.9]
     if weak:
@@ -296,7 +303,8 @@ def _markdown(s: dict) -> str:
         "Verdict: exact McNemar test on paired correctness; *helps*/*hurts* when p < alpha, else *neutral*. "
         "Subgroup p-values are not corrected for multiple comparisons. "
         "Outputs are re-scored with the current parser at analysis time (`rescored_changed` in summary.json); "
-        "unparsed outputs are listed in `parse_failures.jsonl`.",
+        "unparsed outputs are listed in `parse_failures.jsonl`. *No answer* = no valid answer could be extracted; "
+        "*refusal* = the output explicitly declines (\"none of the options\", \"no object matches\", empty box list, \"N/A\").",
         "",
     ]
     return "\n".join(L)
