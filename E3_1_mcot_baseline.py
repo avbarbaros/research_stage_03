@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import csv
 import json
+import shutil
 import time
 from pathlib import Path
 
@@ -78,6 +79,34 @@ def scored_row(item, condition: str, raw: str, out_tokens: int, finish: str | No
     return row
 
 
+def reuse_source(cfg: dict, run_dir: Path) -> Path | None:
+    """Run directory named by E3_1.reuse.from_run (a sibling of this run), or None."""
+    name = (cfg[EXP].get("reuse") or {}).get("from_run")
+    if not name:
+        return None
+    src = run_dir.parent / name
+    if src.resolve() == run_dir.resolve():
+        raise SystemExit("E3_1.reuse.from_run must name a different run than E3_1.run_name")
+    if not src.is_dir():
+        raise SystemExit(f"E3_1.reuse.from_run: {src} does not exist")
+    return src
+
+
+def copy_reused_predictions(cfg: dict, run_dir: Path) -> None:
+    """Copy whole prediction files of E3_1.reuse.copy_conditions from the source run (once)."""
+    src = reuse_source(cfg, run_dir)
+    if src is None:
+        return
+    for cond in cfg[EXP]["reuse"].get("copy_conditions") or []:
+        s_path, d_path = src / f"preds_{cond}.jsonl", run_dir / f"preds_{cond}.jsonl"
+        if d_path.exists():
+            continue
+        if not s_path.exists():
+            raise SystemExit(f"cannot copy {cond}: {s_path} not found")
+        shutil.copyfile(s_path, d_path)
+        print(f"copied {cond} predictions from {src.name}")
+
+
 def run_condition(condition: str, items, vlm, cfg: dict, run_dir: Path) -> float:
     from common.vlm import GenParams, Request
 
@@ -106,6 +135,13 @@ def run_condition(condition: str, items, vlm, cfg: dict, run_dir: Path) -> float
                 "List two_stage before two_stage_noimg in E3_1.conditions."
             )
 
+    saved_rationales = {}
+    src = reuse_source(cfg, run_dir)
+    if condition == "two_stage" and src is not None and (ecfg.get("reuse") or {}).get("rationales", False):
+        saved_rationales = {r["id"]: r for r in read_jsonl(src / "preds_two_stage.jsonl")}
+        n_hit = sum(it.id in saved_rationales for it in todo)
+        print(f"reusing {n_hit} stage-1 rationales from {src.name}; generating {len(todo) - n_hit}")
+
     t0 = time.time()
     for chunk in chunks(todo, int(ecfg.get("chunk_size", 256))):
         rows = []
@@ -119,10 +155,21 @@ def run_condition(condition: str, items, vlm, cfg: dict, run_dir: Path) -> float
 
         elif condition in ("two_stage", "oracle", "two_stage_noimg"):
             if condition == "two_stage":
+                need = [it for it in chunk if it.id not in saved_rationales]
                 rat_outs = vlm.generate(
-                    [Request(fill(prompts["rationale"], it, lec), it.image) for it in chunk], gp_rat, "stage1-rationale"
+                    [Request(fill(prompts["rationale"], it, lec), it.image) for it in need], gp_rat, "stage1-rationale"
                 )
-                rats = [(o.text, o.n_tokens, o.finish_reason) for o in rat_outs]
+                fresh = {it.id: (o.text, o.n_tokens, o.finish_reason) for it, o in zip(need, rat_outs)}
+                rats = [
+                    fresh[it.id]
+                    if it.id in fresh
+                    else (
+                        saved_rationales[it.id]["rationale"],
+                        saved_rationales[it.id]["rationale_tokens"],
+                        saved_rationales[it.id]["rationale_finish"],
+                    )
+                    for it in chunk
+                ]
             elif condition == "oracle":
                 rats = [(it.solution, 0, None) for it in chunk]
             else:
@@ -159,6 +206,7 @@ def run_condition(condition: str, items, vlm, cfg: dict, run_dir: Path) -> float
                         rationale_finish=rfin,
                         rationale_stated_answer=stated,
                         stage2_sees_image=use_image and it.has_image,
+                        rationale_reused=condition == "two_stage" and it.id in saved_rationales,
                     )
                 )
         else:
@@ -268,6 +316,55 @@ def analyze(cfg: dict, run_dir: Path, item_ids: list[str] | None) -> dict:
                 }
         summary["conditions"][cond] = entry
 
+    # ---- additional paired comparisons: [a, b] -> acc(b) - acc(a) on the same items
+    summary["pairs"] = []
+    for a_name, b_name in acfg.get("extra_pairs") or []:
+        if a_name not in preds or b_name not in preds:
+            continue
+        a = [bool(preds[a_name][i]["correct"]) for i in common_ids]
+        b = [bool(preds[b_name][i]["correct"]) for i in common_ids]
+        diff = accuracy(b) - accuracy(a)
+        mc = mcnemar_exact(a, b)
+        dlo, dhi = paired_bootstrap_diff_ci(a, b, n_boot, alpha)
+        summary["pairs"].append(
+            {"a": a_name, "b": b_name, "n": len(common_ids), "acc_a": accuracy(a), "acc_b": accuracy(b),
+             "diff": diff, "diff_ci": [dlo, dhi], **mc, "verdict": verdict(diff, mc["p_value"], alpha)}
+        )
+
+    # ---- does two_stage gain only where the rationale already names a letter?
+    #      Same-item comparison with the baseline, split by rationale_stated_answer.
+    summary["stated_split"] = {}
+    if "two_stage" in preds and base in preds:
+        ts = preds["two_stage"]
+        for label, keep in (("states_letter", True), ("no_letter", False)):
+            sub = [i for i in common_ids if bool(ts[i].get("rationale_stated_answer")) == keep]
+            if not sub:
+                continue
+            a = [bool(preds[base][i]["correct"]) for i in sub]
+            b = [bool(ts[i]["correct"]) for i in sub]
+            mc = mcnemar_exact(a, b)
+            summary["stated_split"][label] = {
+                "n": len(sub), "acc_base": accuracy(a), "acc_two_stage": accuracy(b),
+                "diff": accuracy(b) - accuracy(a), **mc,
+                "verdict": verdict(accuracy(b) - accuracy(a), mc["p_value"], alpha),
+            }
+
+    # ---- every unparsed output, for reading
+    with open(run_dir / "parse_failures.jsonl", "w", encoding="utf-8") as f:
+        for cond, by_id in preds.items():
+            for i in common_ids:
+                r = by_id[i]
+                if r["pred"] is None:
+                    f.write(json.dumps({"condition": cond, "id": i, "gold": r["gold"], "n_choices": r["n_choices"],
+                                        "finish_reason": r.get("finish_reason"), "raw_output": r["raw_output"]},
+                                       ensure_ascii=False) + "\n")
+
+    reuse = ecfg.get("reuse") or {}
+    if reuse.get("from_run"):
+        summary["reused_from"] = {"run": reuse["from_run"], "rationales": bool(reuse.get("rationales")),
+                                  "copied_conditions": list(reuse.get("copy_conditions") or [])}
+    summary["answer_max_new_tokens"] = ecfg["generation"]["answer"]["max_new_tokens"]
+
     dump_json(summary, run_dir / "summary.json")
     (run_dir / "summary.md").write_text(_markdown(summary, GROUP_ORDER), encoding="utf-8")
     _write_per_item_csv(preds, common_ids, run_dir / "per_item.csv")
@@ -345,8 +442,39 @@ def _markdown(s: dict, group_order: list[str]) -> str:
                 f"| {c} | {r['mean_tokens']:.0f} | {_pct(r['truncated_rate'])} | {_pct(r['empty_rate'])} | "
                 f"{_pct(r['states_answer_rate'])} | {_pct(r['final_agrees_with_stated_rate'])} | {_pct(r['stated_answer_correct_rate'])} |"
             )
+    if s.get("pairs"):
+        L += [
+            "",
+            "## Additional paired comparisons (Δ = b − a, same items)",
+            "",
+            "| a | b | acc a % | acc b % | Δ pp | Δ 95% CI | b gains / losses | McNemar p | verdict (b vs a) |",
+            "|---|---|---|---|---|---|---|---|---|",
+        ]
+        for pr in s["pairs"]:
+            L.append(
+                f"| {pr['a']} | {pr['b']} | {_pct(pr['acc_a'])} | {_pct(pr['acc_b'])} | {100 * pr['diff']:+.2f} | "
+                f"{100 * pr['diff_ci'][0]:+.2f} to {100 * pr['diff_ci'][1]:+.2f} | {pr['gains']} / {pr['losses']} | "
+                f"{pr['p_value']:.3g} | **{pr['verdict']}** |"
+            )
+    if s.get("stated_split"):
+        L += [
+            "",
+            f"## two_stage vs {base}, split by whether the rationale names an option letter (same items)",
+            "",
+            f"| rationale | n | {base} % | two_stage % | Δ pp | gains / losses | McNemar p | verdict |",
+            "|---|---|---|---|---|---|---|---|",
+        ]
+        for label, g in s["stated_split"].items():
+            L.append(
+                f"| {label} | {g['n']} | {_pct(g['acc_base'])} | {_pct(g['acc_two_stage'])} | {100 * g['diff']:+.2f} | "
+                f"{g['gains']} / {g['losses']} | {g['p_value']:.3g} | **{g['verdict']}** |"
+            )
+    if s.get("reused_from"):
+        r = s["reused_from"]
+        L += ["", f"Reused from run `{r['run']}`: stage-1 rationales = {r['rationales']}, copied conditions = {r['copied_conditions'] or 'none'}."]
     L += [
         "",
+        f"Answer-call limit: {s.get('answer_max_new_tokens')} new tokens. Unparsed outputs are listed in `parse_failures.jsonl`.",
         "Verdict: McNemar exact test vs the baseline on the same items; *helps*/*hurts* when p < alpha, else *neutral*.",
         "",
     ]
@@ -394,6 +522,18 @@ def main() -> None:
     print(f"run dir: {run_dir}")
 
     if args.analyze_only:
+        # Describe the run as it was generated: generation / reuse settings come from
+        # the config saved with the run; analysis settings come from the current config.
+        stored = run_dir / "config.yaml"
+        if stored.exists():
+            import yaml
+
+            old = yaml.safe_load(stored.read_text(encoding="utf-8")).get(EXP, {})
+            for key in ("generation", "reuse"):
+                if key in old:
+                    ecfg[key] = old[key]
+                else:
+                    ecfg.pop(key, None)
         summary = analyze(cfg, run_dir, item_ids=None)
         print((run_dir / "summary.md").read_text(encoding="utf-8"))
         return
@@ -417,6 +557,7 @@ def main() -> None:
     vlm = VLM(cfg["common"]["model"], system_prompt=ecfg["prompts"].get("system"))
     dump_json({**environment_info(), "backend": vlm.backend, "model": vlm.name}, run_dir / "env.json")
 
+    copy_reused_predictions(cfg, run_dir)
     timings_path = run_dir / "timings.json"
     timings = json.loads(timings_path.read_text()) if timings_path.exists() else {}
     for cond in conditions:

@@ -90,13 +90,25 @@ E3_1:
   chunk_size: 256                 # requests written to disk per chunk; a crash loses at most one chunk
 
   generation:                     # temperature 0 = greedy (deterministic)
-    answer:    {max_new_tokens: 16,  temperature: 0.0, top_p: 1.0}   # direct and stage-2 calls
+    answer:    {max_new_tokens: 64,  temperature: 0.0, top_p: 1.0}   # direct and stage-2 calls (16 truncated 2% of stage-2 answers in full_img)
     rationale: {max_new_tokens: 512, temperature: 0.0, top_p: 1.0}   # stage-1 calls
     cot:       {max_new_tokens: 768, temperature: 0.0, top_p: 1.0}   # single-call CoT
+
+  # Reuse parts of an earlier run (a sibling directory under <output_root>/E3_1/).
+  # Used to re-run only the answer calls after changing generation.answer:
+  #   python E3_1_mcot_baseline.py --set E3_1.run_name=full_img_a64 --set E3_1.reuse.from_run=full_img
+  reuse:
+    from_run: null                # null = generate everything
+    rationales: true              # two_stage takes stage-1 rationales from that run (generates only missing ones)
+    copy_conditions: [cot]        # prediction files copied unchanged (cot is unaffected by generation.answer)
 
   analysis:
     bootstrap_samples: 2000
     alpha: 0.05                   # significance level for the helps/hurts/neutral verdict
+    extra_pairs:                  # [a, b]: paired test of b against a, reported as b - a
+      - [two_stage_noimg, two_stage]   # does stage 2 use the image?
+      - [cot, two_stage]               # one call vs two calls
+      - [two_stage, oracle]            # headroom from a better rationale
 
   # Prompt templates. Available fields: {question} {context} {options}
   # and, in answer_with_rationale only, {rationale}.

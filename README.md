@@ -33,6 +33,10 @@ Any config value can be overridden with `--set key.path=value` (repeatable).
 **Resuming:** predictions are written in chunks. If the runtime dies, rerun the same
 command with the same `run_name`; finished items are skipped.
 
+**Re-running only the answer calls** (e.g. after changing `E3_1.generation.answer`): start a new run that
+reuses the stage-1 rationales and copies the CoT predictions of an earlier run:
+`python E3_1_mcot_baseline.py --set E3_1.run_name=full_img_a64 --set E3_1.reuse.from_run=full_img`
+
 **Re-analysing without a GPU:** `python E3_1_mcot_baseline.py --analyze-only --set E3_1.run_name=full_test`
 
 ## E3.1 conditions
