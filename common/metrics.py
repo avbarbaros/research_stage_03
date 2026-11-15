@@ -21,6 +21,25 @@ def bootstrap_ci(correct: list[bool], n_boot: int = 2000, alpha: float = 0.05, s
     return float(np.quantile(means, alpha / 2)), float(np.quantile(means, 1 - alpha / 2))
 
 
+def wilson_ci(correct: list[bool], alpha: float = 0.05) -> tuple[float, float]:
+    """Wilson score interval for a proportion.
+
+    Unlike the percentile bootstrap it stays informative at 0% / 100% and for
+    small n (a bootstrap of 10/10 correct gives the degenerate interval [1, 1]).
+    """
+    from scipy.stats import norm
+
+    n = len(correct)
+    if n == 0:
+        return float("nan"), float("nan")
+    p = sum(bool(c) for c in correct) / n
+    z = float(norm.ppf(1 - alpha / 2))
+    denom = 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / denom
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
+    return max(0.0, centre - half), min(1.0, centre + half)
+
+
 def paired_bootstrap_diff_ci(
     a: list[bool], b: list[bool], n_boot: int = 2000, alpha: float = 0.05, seed: int = 0
 ) -> tuple[float, float]:

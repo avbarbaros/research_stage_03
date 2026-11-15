@@ -176,11 +176,11 @@ def run_condition(condition: str, items, vlm, cfg: dict, run_dir: Path) -> float
 def analyze(cfg: dict, run_dir: Path, item_ids: list[str] | None) -> dict:
     from common.metrics import (
         accuracy,
-        bootstrap_ci,
         group_accuracy,
         mcnemar_exact,
         paired_bootstrap_diff_ci,
         verdict,
+        wilson_ci,
     )
     from common.scienceqa import GROUP_ORDER
 
@@ -216,7 +216,7 @@ def analyze(cfg: dict, run_dir: Path, item_ids: list[str] | None) -> dict:
     for cond, by_id in preds.items():
         recs = [by_id[i] for i in common_ids]
         corr = [bool(r["correct"]) for r in recs]
-        lo, hi = bootstrap_ci(corr, n_boot, alpha)
+        lo, hi = wilson_ci(corr, alpha)
         entry = {
             "n": len(recs),
             "n_total_in_file": len(by_id),
@@ -299,7 +299,7 @@ def _markdown(s: dict, group_order: list[str]) -> str:
         "",
         "## Accuracy",
         "",
-        "| condition | acc % | 95% CI | Δ vs base (pp) | Δ 95% CI | gains / losses | McNemar p | verdict | img-only Δ (verdict) | parse fail % | truncated % | mean out tok |",
+        "| condition | acc % | 95% CI (Wilson) | Δ vs base (pp) | Δ 95% CI (paired bootstrap) | gains / losses | McNemar p | verdict | img-only Δ (verdict) | parse fail % | truncated % | mean out tok |",
         "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for cond, e in s["conditions"].items():
