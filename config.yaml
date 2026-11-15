@@ -1,0 +1,115 @@
+# =============================================================================
+# Stage 3 — Multimodal Chain-of-Thought and Compositional Reasoning
+# Single configuration file for setup.py and every E3_* experiment script.
+#
+# Any value can be overridden from the command line without editing this file:
+#   python E3_1_mcot_baseline.py --set E3_1.max_samples=200 --set common.model.backend=hf
+# =============================================================================
+
+common:
+  seed: 42
+  output_root: /content/drive/MyDrive/MMRM/research_stage_03            # each experiment writes to <output_root>/<EXP>/<run_name>/
+  # Where Hugging Face caches models and datasets. On Colab, point this at Google
+  # Drive (e.g. /content/drive/MyDrive/hf_cache) so the ~16 GB of weights survive
+  # a runtime reset. null = default (~/.cache/huggingface).
+  hf_cache_dir: null
+
+  model:
+    name: Qwen/Qwen2.5-VL-7B-Instruct
+    backend: vllm                 # vllm (fast, recommended on L4) | hf (plain transformers)
+    dtype: bfloat16
+    # --- image resolution (Qwen2.5-VL dynamic resolution; 1 visual token = 28x28 px) ---
+    min_pixels: 200704            # 256 * 28 * 28
+    max_pixels: 1003520           # 1280 * 28 * 28 (ScienceQA images are small; this rarely binds)
+    # --- vLLM-only ---
+    max_model_len: 8192
+    gpu_memory_utilization: 0.90
+    enforce_eager: false          # true = no CUDA graphs: slower, but saves ~1-2 GB and starts faster
+    max_num_seqs: 64
+    # --- hf-only ---
+    hf_batch_size: 8
+    attn_implementation: sdpa     # sdpa | flash_attention_2 (needs flash-attn installed)
+
+  datasets:
+    scienceqa:
+      hf_id: derek-thomas/ScienceQA
+
+# -----------------------------------------------------------------------------
+# setup.py
+# -----------------------------------------------------------------------------
+setup:
+  # Installed with pip, in order. vLLM brings its own matching torch build;
+  # installing it first and transformers after keeps the two compatible.
+  packages:
+    - "vllm>=0.8.5"
+    - "transformers>=4.51.0"
+    - "accelerate>=1.3.0"
+    - "qwen-vl-utils>=0.0.10"
+    - "datasets>=3.0.0"
+    - "huggingface_hub>=0.30.0"
+    - "pillow"
+    - "pyyaml"
+    - "numpy"
+    - "scipy"
+    - "pandas"
+    - "tqdm"
+  download_model: true
+  download_datasets: [scienceqa]
+
+# -----------------------------------------------------------------------------
+# E3.1 — MCoT baseline: two-stage rationale-then-answer vs direct answering
+# -----------------------------------------------------------------------------
+E3_1:
+  run_name: null                  # null = timestamp. Reuse a name to resume an interrupted run.
+  split: test                     # train | validation | test  (test = 4,241 items)
+  image_only: true               # true = only items with an image (~2,017 of the test split)
+  max_samples: null               # null = whole split; set e.g. 200 for a quick check
+  sample_seed: 42                 # used only when max_samples subsamples the split
+
+  # Conditions to run (any subset, in any order):
+  #   direct           image + question -> option letter
+  #   cot              one call: "think step by step", then the answer (zero-shot CoT control)
+  #   two_stage        Zhang et al. 2023: call 1 writes a rationale, call 2 answers given the rationale
+  #   two_stage_noimg  as two_stage, but call 2 does not see the image (does the answer follow the rationale alone?)
+  #   oracle           call 2 gets ScienceQA's gold `solution` as the rationale (upper bound for rationale quality)
+  # two_stage_noimg reuses the rationales from two_stage, so two_stage must also be listed.
+  conditions: [direct, cot, two_stage, two_stage_noimg, oracle]
+  baseline_condition: direct      # every other condition is compared against this one
+
+  include_lecture: false          # add ScienceQA's `lecture` field to the context (the paper's QCM->LE setting uses no lecture at input)
+  chunk_size: 256                 # requests written to disk per chunk; a crash loses at most one chunk
+
+  generation:                     # temperature 0 = greedy (deterministic)
+    answer:    {max_new_tokens: 16,  temperature: 0.0, top_p: 1.0}   # direct and stage-2 calls
+    rationale: {max_new_tokens: 512, temperature: 0.0, top_p: 1.0}   # stage-1 calls
+    cot:       {max_new_tokens: 768, temperature: 0.0, top_p: 1.0}   # single-call CoT
+
+  analysis:
+    bootstrap_samples: 2000
+    alpha: 0.05                   # significance level for the helps/hurts/neutral verdict
+
+  # Prompt templates. Available fields: {question} {context} {options}
+  # and, in answer_with_rationale only, {rationale}.
+  prompts:
+    system: null                  # null = model default system prompt
+    direct: |-
+      Question: {question}
+      Context: {context}
+      Options: {options}
+      Answer with the option's letter from the given choices directly.
+    cot: |-
+      Question: {question}
+      Context: {context}
+      Options: {options}
+      Think step by step, using the image and the context. Then finish with a final line of the form "The answer is (X)." where X is the option letter.
+    rationale: |-
+      Question: {question}
+      Context: {context}
+      Options: {options}
+      Write a short step-by-step solution that explains how to answer the question, based on the image and the context. Write only the reasoning; do not state which option letter is correct.
+    answer_with_rationale: |-
+      Question: {question}
+      Context: {context}
+      Options: {options}
+      Solution: {rationale}
+      Using the solution above, answer with the option's letter from the given choices directly.
