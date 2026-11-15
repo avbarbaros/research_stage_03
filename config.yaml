@@ -33,6 +33,16 @@ common:
   datasets:
     scienceqa:
       hf_id: derek-thomas/ScienceQA
+      download_splits: [test]
+    mathvista:
+      hf_id: AI4Math/MathVista
+      download_splits: [testmini]
+    countbench:
+      hf_id: vikhyatk/CountBenchQA
+      download_splits: [test]
+    refcoco:
+      hf_id: lmms-lab-encoder/RefCOCO   # formerly lmms-lab/RefCOCO; bbox is [x, y, w, h] in original pixels
+      download_splits: [val]            # ~1.1 GB
 
 # -----------------------------------------------------------------------------
 # setup.py
@@ -54,7 +64,7 @@ setup:
     - "pandas"
     - "tqdm"
   download_model: true
-  download_datasets: [scienceqa]
+  download_datasets: [scienceqa, mathvista, countbench, refcoco]
 
 # -----------------------------------------------------------------------------
 # E3.1 — MCoT baseline: two-stage rationale-then-answer vs direct answering
@@ -113,3 +123,77 @@ E3_1:
       Options: {options}
       Solution: {rationale}
       Using the solution above, answer with the option's letter from the given choices directly.
+
+# -----------------------------------------------------------------------------
+# E3.2 — CoT harm audit: direct vs CoT prompting across four task families
+# -----------------------------------------------------------------------------
+E3_2:
+  run_name: null                  # null = timestamp. Reuse a name to resume an interrupted run.
+  conditions: [direct, cot]
+  baseline_condition: direct
+  run_families: [math, science, counting, grounding]   # any subset of the keys below
+
+  # One dataset per family. max_samples: null = whole split; sampling is seeded.
+  families:
+    math:
+      dataset: mathvista
+      split: testmini             # 1,000 items: multiple choice + integer / float / list / text answers
+      max_samples: null
+      sample_seed: 42
+    science:
+      dataset: scienceqa
+      split: test                 # image items only (2,017); subsampled to match the other families
+      max_samples: 1000
+      sample_seed: 42
+    counting:
+      dataset: countbench
+      split: test                 # 491 items, counts 2-10
+      max_samples: null
+      sample_seed: 42
+    grounding:
+      dataset: refcoco
+      split: val                  # 8,811 objects; scored as Acc@IoU>=iou_threshold
+      max_samples: 1000
+      sample_seed: 42
+      expression_index: 0         # which of the object's referring expressions is used as the query
+
+  iou_threshold: 0.5
+  chunk_size: 256
+
+  generation:                     # temperature 0 = greedy (deterministic)
+    direct: {max_new_tokens: 128,  temperature: 0.0, top_p: 1.0}   # room for a JSON box; letters stop early
+    cot:    {max_new_tokens: 1024, temperature: 0.0, top_p: 1.0}
+
+  analysis:
+    bootstrap_samples: 2000
+    alpha: 0.05
+    examples_per_family: 25       # CoT-loss examples (direct right, CoT wrong) saved for reading
+
+  # Prompt templates, one pair per answer kind.
+  #   mc:   {question} {options}        (ScienceQA, MathVista multiple choice)
+  #   open: {question} {format}         (MathVista free-form, CountBench); {format} e.g. "an integer"
+  #   bbox: {question} = referring expression (RefCOCO); Qwen2.5-VL's native grounding phrasing
+  # The cot variants differ from direct only in the reasoning instruction and the final-answer line.
+  prompts:
+    system: null
+    mc:
+      direct: |-
+        {question}
+        Options: {options}
+        Answer with the option's letter from the given choices directly.
+      cot: |-
+        {question}
+        Options: {options}
+        Think step by step. Then finish with a final line of the form "The answer is (X)." where X is the option letter.
+    open:
+      direct: |-
+        {question}
+        Answer with {format} only.
+      cot: |-
+        {question}
+        Think step by step. Then finish with a final line of the form "The answer is N." where N is {format}.
+    bbox:
+      direct: |-
+        Locate "{question}" in the image and output its bbox coordinates in JSON format.
+      cot: |-
+        Locate "{question}" in the image. First think step by step about which object the description refers to (its category, attributes and position relative to other objects). Then output its bbox coordinates in JSON format.

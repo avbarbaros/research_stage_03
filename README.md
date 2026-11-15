@@ -7,8 +7,9 @@ Multimodal reasoning models Stage-3: multimodal chain-of-thought and composition
 config.yaml              every configurable parameter (setup + each experiment)
 setup.py                 prepares a Colab runtime (run it directly; it is not a setuptools file)
 E3_1_mcot_baseline.py    E3.1 two-stage rationale-then-answer vs direct answering on ScienceQA
+E3_2_cot_harm_audit.py   E3.2 direct vs CoT on math / science / counting / grounding
 docs/                    write-ups of each experiment's results (docs/E3_1_results.md)
-common/                  shared code: config, ScienceQA loader, VLM wrapper (vLLM / transformers),
+common/                  shared code: config, dataset loaders + scoring (tasks.py), VLM wrapper (vLLM / transformers),
                          answer parsing, metrics
 outputs/<EXP>/<run>/     results (git-ignored)
 ```

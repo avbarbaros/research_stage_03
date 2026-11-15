@@ -76,10 +76,15 @@ def download_datasets(cfg: dict, names: list[str]) -> None:
     from datasets import load_dataset
 
     for name in names:
-        hf_id = cfg["common"]["datasets"][name]["hf_id"]
-        print(f"\n== Downloading dataset {name} ({hf_id}) ==")
-        ds = load_dataset(hf_id)
-        print(ds)
+        dcfg = cfg["common"]["datasets"][name]
+        hf_id = dcfg["hf_id"]
+        splits = dcfg.get("download_splits")
+        print(f"\n== Downloading dataset {name} ({hf_id}, splits: {splits or 'all'}) ==")
+        if splits:
+            for split in splits:
+                print(split, load_dataset(hf_id, split=split))
+        else:
+            print(load_dataset(hf_id))
 
 
 def smoke_test(cfg: dict) -> None:

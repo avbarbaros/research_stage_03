@@ -56,3 +56,119 @@ def extract_choice(text: str, choices: list[str]) -> tuple[str | None, str]:
         return LETTERS[found[0]], "option_text"
 
     return None, "none"
+
+
+# =============================================================================
+# Open-ended answers (numbers, short text, lists) — used from E3.2 on
+# =============================================================================
+_ANSWER_IS = re.compile(r"(?i:answer\s*(?:is|:))\s*[:\-]?\s*(.+)")
+_NUM = re.compile(r"-?\d[\d,]*(?:\.\d+)?(?:\s*/\s*\d+(?:\.\d+)?)?|-?\.\d+")
+_WORD_NUMS = {
+    w: i
+    for i, w in enumerate(
+        "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen "
+        "fifteen sixteen seventeen eighteen nineteen twenty".split()
+    )
+}
+_WORD_NUM_RE = re.compile(r"\b(" + "|".join(_WORD_NUMS) + r")\b", re.IGNORECASE)
+
+
+def answer_span(text: str) -> tuple[str, str]:
+    """Isolate the part of an output that holds the final answer.
+
+    Returns (span, rule): rule "explicit" when an "answer is ..." phrase was
+    found (the last one wins, cut at the end of its line), else "whole".
+    """
+    if text is None:
+        return "", "none"
+    hits = list(_ANSWER_IS.finditer(text))
+    if hits:
+        span = hits[-1].group(1).split("\n")[0].strip()
+        return span.strip(" *`\"'"), "explicit"
+    return text.strip(), "whole"
+
+
+def _to_float(tok: str) -> float | None:
+    tok = tok.replace(",", "").replace(" ", "")
+    try:
+        if "/" in tok:
+            a, b = tok.split("/")
+            return float(a) / float(b)
+        return float(tok)
+    except (ValueError, ZeroDivisionError):
+        return None
+
+
+def parse_number(text: str, prefer: str = "first") -> float | None:
+    """First (or last) number in text; digits first, then number words."""
+    toks = _NUM.findall(text or "")
+    vals = [v for v in (_to_float(t) for t in toks) if v is not None]
+    if vals:
+        return vals[0] if prefer == "first" else vals[-1]
+    words = _WORD_NUM_RE.findall(text or "")
+    if words:
+        w = words[0] if prefer == "first" else words[-1]
+        return float(_WORD_NUMS[w.lower()])
+    return None
+
+
+def extract_number(text: str) -> tuple[float | None, str]:
+    """Number answer: inside the "answer is" span if present, else the last number of the output
+    (the final number of a reasoning chain; for a bare direct answer first == last)."""
+    span, rule = answer_span(text)
+    if rule == "explicit":
+        v = parse_number(span, "first")
+        if v is not None:
+            return v, "explicit"
+    v = parse_number(text or "", "last")
+    return (v, "last_number") if v is not None else (None, "none")
+
+
+def extract_number_list(text: str) -> tuple[list[float] | None, str]:
+    span, rule = answer_span(text)
+    m = re.findall(r"\[([^\[\]]*)\]", span) or re.findall(r"\[([^\[\]]*)\]", text or "")
+    src = m[-1] if m else span
+    vals = [v for v in (_to_float(t) for t in _NUM.findall(src)) if v is not None]
+    return (vals, rule if m or rule == "explicit" else "whole") if vals else (None, "none")
+
+
+def normalize_text(s: str) -> str:
+    s = (s or "").lower().strip()
+    s = re.sub(r"[\"'`*]", "", s)
+    s = re.sub(r"[.,;:!?]+$", "", s).strip()
+    s = re.sub(r"^(the|a|an)\s+", "", s)
+    return re.sub(r"\s+", " ", s)
+
+
+# =============================================================================
+# Bounding boxes (Qwen2.5-VL grounding output)
+# =============================================================================
+_BBOX_KEY = re.compile(r'"?bbox(?:_2d)?"?\s*:\s*\[\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\]')
+_BBOX_ANY = re.compile(r"\[\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\]")
+_BBOX_PAIRS = re.compile(r"\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)\s*(?:,|to|-)?\s*\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)")
+
+
+def extract_bbox(text: str) -> tuple[list[float] | None, str]:
+    """Last box in the output as [x1, y1, x2, y2] (model coordinates).
+
+    Rules: "bbox_2d": [...] (Qwen JSON) > any 4-number list > (x1,y1),(x2,y2).
+    The last match wins, so a reasoning chain that mentions several boxes is
+    scored on its final one.
+    """
+    for rule, rx in (("json", _BBOX_KEY), ("list", _BBOX_ANY), ("pairs", _BBOX_PAIRS)):
+        hits = rx.findall(text or "")
+        if hits:
+            try:
+                x1, y1, x2, y2 = (float(v) for v in hits[-1])
+            except ValueError:
+                continue
+            return [min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)], rule
+    return None, "none"
+
+
+def iou(a: list[float], b: list[float]) -> float:
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union if union > 0 else 0.0
