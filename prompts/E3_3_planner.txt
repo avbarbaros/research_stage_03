@@ -13,6 +13,9 @@ class ImagePatch:
     def find(self, object_name: str) -> list[ImagePatch]:
         """All detected instances of object_name inside this patch, most confident first. [] if none.
         object_name is a short noun phrase such as "cup" or "red car"."""
+    def find_marked(self, object_name: str, color: str) -> list[ImagePatch]:
+        """Like find(), but the instance outlined by a drawn box of the given color (e.g. "red") comes first.
+        Use it whenever the question says an object is highlighted or annotated by a colored box."""
     def exists(self, object_name: str) -> bool:
         """True if find(object_name) is not empty."""
     def count(self, object_name: str) -> int:
@@ -43,6 +46,8 @@ Rules:
 - Otherwise return a single word or short phrase, for example "yes", "no", "left", "red", "man".
 - Use find() and box geometry for left/right, above/below and counting questions. Use compute_depth() for closer/farther-from-the-camera questions. Use simple_query() on a found patch for attributes, materials, actions and names.
 - Use distance_3d() for "which object is closer to X" questions about distances between objects; use compute_depth() only for distance to the camera.
+- If the question says an object is "highlighted by a red box" or "annotated by the red box", get it with find_marked(name, "red"): the question means that specific instance.
+- Boxes come only from find() or find_marked(). Never write pixel coordinates yourself.
 - find() returns a list. Check that it is not empty, then use an element such as objects[0]. Never call ImagePatch methods on the list itself.
 - When find() returns [] for an object you need, fall back to image_patch.simple_query(<the original question>).
 - verify_property() needs a concrete value such as "red", "wooden" or "open", never a property name such as "color". To compare an attribute of two objects, ask simple_query() about each one and compare the answers.
@@ -134,26 +139,26 @@ def execute_command(image):
     return "above" if lamps[0].center_y < sofas[0].center_y else "below"
 ```
 
-Question: Which object is closer to the camera, the chair or the lamp?
+Question: Which object is closer to the camera, the chair (highlighted by a red box) or the lamp (highlighted by a blue box)?
 Options: chair, lamp
 ```python
 def execute_command(image):
     image_patch = ImagePatch(image)
-    chairs = image_patch.find("chair")
-    lamps = image_patch.find("lamp")
+    chairs = image_patch.find_marked("chair", "red")
+    lamps = image_patch.find_marked("lamp", "blue")
     if not chairs or not lamps:
         return image_patch.simple_query("Which object is closer to the camera, the chair or the lamp?")
     return "chair" if chairs[0].compute_depth() < lamps[0].compute_depth() else "lamp"
 ```
 
-Question: Which object is closer to the sofa, the lamp or the plant?
+Question: Which object is closer to the sofa (highlighted by a red box), the lamp (highlighted by a blue box) or the plant (highlighted by a green box)?
 Options: lamp, plant
 ```python
 def execute_command(image):
     image_patch = ImagePatch(image)
-    sofas = image_patch.find("sofa")
-    lamps = image_patch.find("lamp")
-    plants = image_patch.find("plant")
+    sofas = image_patch.find_marked("sofa", "red")
+    lamps = image_patch.find_marked("lamp", "blue")
+    plants = image_patch.find_marked("plant", "green")
     if not sofas or not lamps or not plants:
         return image_patch.best_text_match(["lamp", "plant"])
     sofa = sofas[0]

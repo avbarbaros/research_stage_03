@@ -231,6 +231,26 @@ class ImagePatch:
                           "boxes": [_r(p.box) for p in found[:10]], "scores": [round(p.score, 2) for p in found[:10]]})
         return found
 
+    def find_marked(self, object_name: str, color: str) -> list["ImagePatch"]:
+        """Like find(), but the instance outlined by a drawn box of `color` comes first.
+
+        Visual prompts ("the lamp (highlighted by a green box)") refer to one specific
+        instance; the detector's most confident instance is often another one. Each
+        candidate's crop, with extra margin so the drawn outline is visible, is shown to
+        the VLM and asked whether it is outlined in that colour."""
+        ctx = _CTX
+        cands = self.find(object_name)
+        n_max = int(ctx.query_cfg.get("marked_candidates", 5))
+        margin = float(ctx.query_cfg.get("marked_margin", 0.25))
+        for c in cands[:n_max]:
+            ctx.tick()
+            q = f"Is this {object_name} outlined by a {color} box? Answer yes or no."
+            a = ctx.ask(c._crop_image(margin), q)
+            ctx.trace.append({"op": "marked_check", "patch": c.box, "q": q, "a": a})
+            if a.strip().lower().startswith("yes"):
+                return [c] + [x for x in cands if x is not c]
+        return cands
+
     def exists(self, object_name: str) -> bool:
         return len(self.find(object_name)) > 0
 
@@ -399,6 +419,8 @@ def trace_summary(trace: list) -> dict:
         "n_find": ops.count("find"),
         "n_query": ops.count("simple_query"),
         "n_depth": ops.count("compute_depth"),
+        "n_marked_checks": ops.count("marked_check"),
+        "used_marked": "marked_check" in ops,
         "used_detector": "find" in ops,
         "used_depth": "compute_depth" in ops,
         "empty_find": any(t["op"] == "find" and t["n"] == 0 for t in trace),

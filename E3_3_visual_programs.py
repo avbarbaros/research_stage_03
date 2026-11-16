@@ -236,6 +236,7 @@ def analyze(cfg: dict, run_dir: Path) -> dict:
                 "degenerate_rate": accuracy([bool(r.get("degenerate")) for r in recs]),
                 "used_detector_rate": accuracy([bool(r.get("used_detector")) for r in recs]),
                 "used_depth_rate": accuracy([bool(r.get("used_depth")) for r in recs]),
+                "used_marked_rate": accuracy([bool(r.get("used_marked")) for r in recs]),
                 "empty_find_rate": accuracy([bool(r.get("empty_find")) for r in recs]),
                 "mean_tool_calls": sum(r.get("n_calls", 0) for r in recs) / len(recs),
                 "mean_seconds": sum(r.get("seconds", 0.0) for r in recs) / len(recs),
@@ -339,13 +340,13 @@ def _markdown(s: dict) -> str:
     L += ["", "**Subsets where the agent significantly beats direct:** " + ("; ".join(wins) if wins else "none")]
 
     L += ["", "## Programs", "",
-          "| benchmark | errors % | error types | planner cut off % | query-only programs % | used detector % | used depth % | a find() came back empty % | mean tool calls | mean s / item |",
-          "|---|---|---|---|---|---|---|---|---|---|"]
+          "| benchmark | errors % | error types | planner cut off % | query-only programs % | used detector % | used depth % | used find_marked % | a find() came back empty % | mean tool calls | mean s / item |",
+          "|---|---|---|---|---|---|---|---|---|---|---|"]
     for b, e in s["benchmarks"].items():
         p = e["programs"]
         et = ", ".join(f"{k} {v}" for k, v in p["error_types"].items()) or "—"
         L.append(f"| {b} | {_pct(p['error_rate'])} | {et} | {_pct(p['planner_truncated_rate'])} | {_pct(p['degenerate_rate'])} | "
-                 f"{_pct(p['used_detector_rate'])} | {_pct(p['used_depth_rate'])} | {_pct(p['empty_find_rate'])} | "
+                 f"{_pct(p['used_detector_rate'])} | {_pct(p['used_depth_rate'])} | {_pct(p.get('used_marked_rate'))} | {_pct(p['empty_find_rate'])} | "
                  f"{p['mean_tool_calls']:.1f} | {p['mean_seconds']:.1f} |")
     infra = {b: e["programs"]["infrastructure_errors"] for b, e in s["benchmarks"].items() if e["programs"].get("infrastructure_errors")}
     if infra:

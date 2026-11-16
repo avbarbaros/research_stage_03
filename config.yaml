@@ -271,6 +271,8 @@ E3_3:
       crop_margin: 0.1            # context added around a found box before asking
       min_crop_px: 32
       prompt: "{question} Answer with a single word or short phrase."
+      marked_candidates: 5        # find_marked(): candidates checked for a drawn coloured outline
+      marked_margin: 0.25         # extra context around a candidate so the drawn outline is visible
 
   planner:
     prompt_file: prompts/E3_3_planner.txt   # API description + worked examples; {question} {answer_format}
