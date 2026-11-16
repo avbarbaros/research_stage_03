@@ -1,0 +1,145 @@
+You write short Python programs that answer a question about an image. Use only the API below and plain Python. Do not import anything.
+
+class ImagePatch:
+    """A rectangular region of the image.
+    Coordinates are pixels of the FULL image: x grows to the right, y grows DOWNWARD (y = 0 is the top edge).
+    So a smaller center_y means higher in the image, and a smaller center_x means further left."""
+    left, top, right, bottom: int      # box of this patch in full-image pixels
+    width, height: int
+    center_x, center_y: float
+    image_width, image_height: int     # size of the full image
+    score: float                       # detector confidence (1.0 for the full image)
+
+    def find(self, object_name: str) -> list[ImagePatch]:
+        """All detected instances of object_name inside this patch, most confident first. [] if none.
+        object_name is a short noun phrase such as "cup" or "red car"."""
+    def exists(self, object_name: str) -> bool:
+        """True if find(object_name) is not empty."""
+    def count(self, object_name: str) -> int:
+        """Number of detected instances of object_name inside this patch."""
+    def simple_query(self, question: str) -> str:
+        """Ask a vision-language model a simple question about this patch only. Returns a short answer."""
+    def verify_property(self, object_name: str, attribute: str) -> bool:
+        """True if the object_name shown in this patch has the attribute, e.g. ("shirt", "blue")."""
+    def best_text_match(self, options: list[str]) -> str:
+        """The option that best describes this patch."""
+    def compute_depth(self) -> float:
+        """Median distance of this patch from the camera: 0.0 = closest point in the image, 1.0 = farthest."""
+    def crop(self, left, top, right, bottom) -> ImagePatch:
+        """A new patch for the given full-image box."""
+    def overlaps(self, other: ImagePatch) -> bool:
+        """True if the two boxes overlap."""
+
+def distance(a: ImagePatch, b: ImagePatch) -> float:
+    """Pixel distance between the centres of two patches."""
+def bool_to_yesno(b: bool) -> str:
+    """"yes" or "no"."""
+
+Rules:
+- Write exactly one function `def execute_command(image) -> str:` whose first line is `image_patch = ImagePatch(image)`. It must return the final answer as a string.
+- If the question lists options, return one of the options exactly as written.
+- Otherwise return a single word or short phrase, for example "yes", "no", "left", "red", "man".
+- Use find() and box geometry for left/right, above/below and counting questions. Use compute_depth() for closer/farther-from-the-camera questions. Use simple_query() on a found patch for attributes, materials, actions and names.
+- When find() returns [] for an object you need, fall back to image_patch.simple_query(<the original question>).
+- Output only the program in one ```python block.
+
+Examples:
+
+Question: Is there a cat to the left of the sofa?
+Answer format: a single word or phrase
+```python
+def execute_command(image):
+    image_patch = ImagePatch(image)
+    cats = image_patch.find("cat")
+    sofas = image_patch.find("sofa")
+    if not cats or not sofas:
+        return image_patch.simple_query("Is there a cat to the left of the sofa?")
+    sofa = sofas[0]
+    for cat in cats:
+        if cat.center_x < sofa.center_x:
+            return "yes"
+    return "no"
+```
+
+Question: What color is the car that is next to the tree?
+Answer format: a single word or phrase
+```python
+def execute_command(image):
+    image_patch = ImagePatch(image)
+    cars = image_patch.find("car")
+    if not cars:
+        return image_patch.simple_query("What color is the car that is next to the tree?")
+    trees = image_patch.find("tree")
+    if trees:
+        cars = sorted(cars, key=lambda car: distance(car, trees[0]))
+    return cars[0].simple_query("What color is this car?")
+```
+
+Question: Is the man on the left or on the right of the image?
+Answer format: a single word or phrase
+```python
+def execute_command(image):
+    image_patch = ImagePatch(image)
+    men = image_patch.find("man")
+    if not men:
+        return image_patch.simple_query("Is the man on the left or on the right of the image?")
+    return "left" if men[0].center_x < image_patch.width / 2 else "right"
+```
+
+Question: Who is wearing the hat?
+Answer format: a single word or phrase
+```python
+def execute_command(image):
+    image_patch = ImagePatch(image)
+    return image_patch.simple_query("Who is wearing the hat?")
+```
+
+Question: Are both the cup and the plate made of glass?
+Answer format: a single word or phrase
+```python
+def execute_command(image):
+    image_patch = ImagePatch(image)
+    cups = image_patch.find("cup")
+    plates = image_patch.find("plate")
+    if not cups or not plates:
+        return image_patch.simple_query("Are both the cup and the plate made of glass?")
+    both = cups[0].verify_property("cup", "made of glass") and plates[0].verify_property("plate", "made of glass")
+    return bool_to_yesno(both)
+```
+
+Question: How many apples are in the image?
+Options: 3, 2, 5, 4
+```python
+def execute_command(image):
+    image_patch = ImagePatch(image)
+    return str(image_patch.count("apple"))
+```
+
+Question: Where is the lamp located with respect to the sofa?
+Options: above, below
+```python
+def execute_command(image):
+    image_patch = ImagePatch(image)
+    lamps = image_patch.find("lamp")
+    sofas = image_patch.find("sofa")
+    if not lamps or not sofas:
+        return image_patch.simple_query("Is the lamp above or below the sofa? Answer above or below.")
+    return "above" if lamps[0].center_y < sofas[0].center_y else "below"
+```
+
+Question: Which object is closer to the camera, the chair or the lamp?
+Options: chair, lamp
+```python
+def execute_command(image):
+    image_patch = ImagePatch(image)
+    chairs = image_patch.find("chair")
+    lamps = image_patch.find("lamp")
+    if not chairs or not lamps:
+        return image_patch.simple_query("Which object is closer to the camera, the chair or the lamp?")
+    return "chair" if chairs[0].compute_depth() < lamps[0].compute_depth() else "lamp"
+```
+
+Now write the program for this question.
+
+Question: {question}
+{answer_format}

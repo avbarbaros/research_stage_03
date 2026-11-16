@@ -79,8 +79,12 @@ def download_datasets(cfg: dict, names: list[str]) -> None:
         dcfg = cfg["common"]["datasets"][name]
         hf_id = dcfg["hf_id"]
         splits = dcfg.get("download_splits")
-        print(f"\n== Downloading dataset {name} ({hf_id}, splits: {splits or 'all'}) ==")
-        if splits:
+        configs = dcfg.get("download_configs")
+        print(f"\n== Downloading dataset {name} ({hf_id}, splits: {splits or configs or 'all'}) ==")
+        if configs:
+            for conf, split in configs:
+                print(conf, split, load_dataset(hf_id, conf, split=split))
+        elif splits:
             for split in splits:
                 print(split, load_dataset(hf_id, split=split))
         else:
@@ -125,6 +129,8 @@ def main() -> None:
     report_versions()
     if not args.skip_model and scfg.get("download_model", True):
         download_model(cfg["common"]["model"]["name"])
+        for extra in scfg.get("extra_models") or []:
+            download_model(extra)
     if not args.skip_data:
         download_datasets(cfg, scfg.get("download_datasets", []))
     (REPO_ROOT / cfg["common"]["output_root"]).mkdir(parents=True, exist_ok=True)

@@ -99,7 +99,7 @@ class VLM:
             seed=0,
         )
 
-    def _generate_vllm(self, reqs: list[Request], gp: GenParams, desc: str) -> list[Output]:
+    def _generate_vllm(self, reqs: list[Request], gp: GenParams, desc: str, progress: bool = True) -> list[Output]:
         from vllm import SamplingParams
 
         sp = SamplingParams(
@@ -114,7 +114,7 @@ class VLM:
             if r.image is not None:
                 item["multi_modal_data"] = {"image": r.image}
             inputs.append(item)
-        results = self.llm.generate(inputs, sp, use_tqdm=True)
+        results = self.llm.generate(inputs, sp, use_tqdm=progress)
         outs = []
         for res in results:
             o = res.outputs[0]
@@ -139,7 +139,7 @@ class VLM:
         ).eval()
         self.processor.tokenizer.padding_side = "left"
 
-    def _generate_hf(self, reqs: list[Request], gp: GenParams, desc: str) -> list[Output]:
+    def _generate_hf(self, reqs: list[Request], gp: GenParams, desc: str, progress: bool = True) -> list[Output]:
         import torch
 
         bs = int(self.cfg.get("hf_batch_size", 8))
@@ -148,7 +148,7 @@ class VLM:
         if gp.seed is not None:
             torch.manual_seed(gp.seed)
         outs: list[Output] = []
-        for start in tqdm(range(0, len(reqs), bs), desc=desc):
+        for start in tqdm(range(0, len(reqs), bs), desc=desc, disable=not progress):
             batch = reqs[start : start + bs]
             texts = [self.build_prompt(r) for r in batch]
             images = [r.image for r in batch if r.image is not None]
@@ -181,9 +181,9 @@ class VLM:
         return outs
 
     # ------------------------------------------------------------------ public
-    def generate(self, reqs: list[Request], gp: GenParams, desc: str = "generate") -> list[Output]:
+    def generate(self, reqs: list[Request], gp: GenParams, desc: str = "generate", progress: bool = True) -> list[Output]:
         if not reqs:
             return []
         if self.backend == "vllm":
-            return self._generate_vllm(reqs, gp, desc)
-        return self._generate_hf(reqs, gp, desc)
+            return self._generate_vllm(reqs, gp, desc, progress)
+        return self._generate_hf(reqs, gp, desc, progress)

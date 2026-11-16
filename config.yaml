@@ -43,6 +43,12 @@ common:
     refcoco:
       hf_id: lmms-lab-encoder/RefCOCO   # formerly lmms-lab/RefCOCO; bbox is [x, y, w, h] in original pixels
       download_splits: [val]            # ~1.1 GB
+    gqa:
+      hf_id: lmms-lab-encoder/GQA       # formerly lmms-lab/GQA; questions and images are separate configs
+      download_configs: [[testdev_balanced_instructions, testdev], [testdev_balanced_images, testdev]]
+    cvbench:
+      hf_id: nyu-visionx/CV-Bench
+      download_splits: [test]
 
 # -----------------------------------------------------------------------------
 # setup.py
@@ -64,7 +70,10 @@ setup:
     - "pandas"
     - "tqdm"
   download_model: true
-  download_datasets: [scienceqa, mathvista, countbench, refcoco]
+  download_datasets: [scienceqa, mathvista, countbench, refcoco, gqa, cvbench]
+  extra_models:                   # tool models used by E3.3 (downloaded only)
+    - IDEA-Research/grounding-dino-tiny
+    - depth-anything/Depth-Anything-V2-Small-hf
 
 # -----------------------------------------------------------------------------
 # E3.1 — MCoT baseline: two-stage rationale-then-answer vs direct answering
@@ -215,3 +224,79 @@ E3_2:
         Locate "{question}" in the image.
         Before giving the box, reason step by step in plain sentences: list the objects in the image that could match the description, and explain which one matches its category, attributes and position relative to other objects.
         Only after this reasoning, output the bbox coordinates of the matching object in JSON format.
+
+# -----------------------------------------------------------------------------
+# E3.3 — Visual programs (ViperGPT-style agent) vs end-to-end prompting
+# -----------------------------------------------------------------------------
+E3_3:
+  run_name: null
+  # The VLM shares the L4 with the detector and depth model: give vLLM less memory.
+  # ~16.6 GB of weights + KV cache at 0.82; leaves ~4 GB for Grounding DINO + Depth Anything.
+  model_overrides:
+    gpu_memory_utilization: 0.82
+    max_model_len: 6144
+    max_num_seqs: 32
+
+  run_benchmarks: [gqa, cvbench]
+  benchmarks:
+    gqa:
+      dataset: gqa
+      split: testdev              # testdev-balanced: 12,578 questions over 398 images
+      max_samples: 1000
+      sample_seed: 42
+    cvbench:
+      dataset: cvbench
+      split: test
+      tasks: [Count, Relation, Depth, Distance]   # 788 / 650 / 600 / 600 items
+      max_per_task: 250
+      sample_seed: 42
+
+  tools:
+    device: cuda
+    detector:
+      model: IDEA-Research/grounding-dino-tiny
+      box_threshold: 0.35
+      text_threshold: 0.25
+      nms_iou: 0.5
+      max_detections: 20
+    depth:
+      model: depth-anything/Depth-Anything-V2-Small-hf
+    query:                        # crop-and-requery: the VLM asked about a cropped region
+      max_new_tokens: 16
+      crop_margin: 0.1            # context added around a found box before asking
+      min_crop_px: 32
+      prompt: "{question} Answer with a single word or short phrase."
+
+  planner:
+    prompt_file: prompts/E3_3_planner.txt   # API description + worked examples; {question} {answer_format}
+    sees_image: false             # classic ViperGPT: the program is written from the question alone
+    max_new_tokens: 512
+    temperature: 0.0
+
+  executor:
+    timeout_s: 60
+    max_tool_calls: 30
+    # agent_fb: when a program fails (exception, timeout, no answer), use the direct answer instead.
+    # Both the strict agent and agent_fb are always reported.
+
+  generation:
+    direct: {max_new_tokens: 32, temperature: 0.0, top_p: 1.0}
+
+  analysis:
+    bootstrap_samples: 2000
+    alpha: 0.05
+    examples_per_benchmark: 25    # random (seeded) agent losses and wins saved with code + trace
+    example_seed: 0
+    group_by:                     # subsets reported per benchmark (keys stored with each item)
+      gqa: [structural, semantic, spatial]
+      cvbench: [task]
+
+  prompts:
+    system: null
+    direct_open: |-
+      {question}
+      Answer the question using a single word or phrase.
+    direct_mc: |-
+      {question}
+      Options: {options}
+      Answer with the option's letter from the given choices directly.

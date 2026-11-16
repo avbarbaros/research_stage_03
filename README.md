@@ -8,8 +8,10 @@ config.yaml              every configurable parameter (setup + each experiment)
 setup.py                 prepares a Colab runtime (run it directly; it is not a setuptools file)
 E3_1_mcot_baseline.py    E3.1 two-stage rationale-then-answer vs direct answering on ScienceQA
 E3_2_cot_harm_audit.py   E3.2 direct vs CoT on math / science / counting / grounding
+E3_3_visual_programs.py  E3.3 ViperGPT-style visual programs (detector + depth + crop queries) vs direct, on GQA and CV-Bench
+prompts/                 long prompt templates (E3_3_planner.txt: the ImagePatch API and worked examples)
 docs/                    results write-ups: docs/E3_1_results.md, docs/E3_2_results.md
-common/                  shared code: config, dataset loaders + scoring (tasks.py), VLM wrapper (vLLM / transformers),
+common/                  shared code: config, dataset loaders + scoring (tasks.py), visual-program runtime (visprog.py), VLM wrapper (vLLM / transformers),
                          answer parsing, metrics
 outputs/<EXP>/<run>/     results (git-ignored)
 ```
@@ -27,6 +29,7 @@ python setup.py --smoke-test                 # install, download model + Science
 python E3_1_mcot_baseline.py --set E3_1.max_samples=100 --set E3_1.run_name=quick   # quick check
 python E3_1_mcot_baseline.py --set E3_1.run_name=full_img                           # 2,017 image items (image_only: true)
 python E3_2_cot_harm_audit.py --set E3_2.run_name=full                              # four task families
+python E3_3_visual_programs.py --set E3_3.run_name=full                             # GQA + CV-Bench, agent vs direct
 ```
 
 Any config value can be overridden with `--set key.path=value` (repeatable).

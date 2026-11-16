@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import math
 import random
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -292,7 +293,96 @@ def load_refcoco_items(dcfg: dict, fcfg: dict, mcfg: dict) -> list[TaskItem]:
     return out
 
 
+# Spatial relations in GQA programs ("relate: table,to the left of,o (12)").
+_GQA_SPATIAL = {
+    "to the left of", "to the right of", "on top of", "above", "below", "under", "beneath",
+    "behind", "in front of", "next to", "beside", "near", "left", "right", "top", "bottom",
+}
+
+
+def _gqa_is_spatial(types: dict, semantic) -> bool:
+    if str(types.get("detailed", "")).startswith("position"):
+        return True
+    for op in semantic or []:
+        if "rel" not in str(op.get("operation", "")):
+            continue
+        arg = str(op.get("argument", ""))
+        parts = [p.strip() for p in re.split(r"[,|]", arg.split("(")[0])]
+        if any(p in _GQA_SPATIAL for p in parts):
+            return True
+    return False
+
+
+def load_gqa_items(dcfg: dict, fcfg: dict, mcfg: dict) -> list[TaskItem]:
+    """GQA testdev-balanced (lmms-lab copy). Questions and images are separate
+    configs; images are joined by imageId. Answers are short open words,
+    scored by normalised exact match (standard GQA accuracy)."""
+    from datasets import load_dataset
+
+    split = fcfg.get("split", "testdev")
+    qs = load_dataset(dcfg["hf_id"], f"{split}_balanced_instructions", split=split)
+    rows = _sample_rows(len(qs), fcfg.get("max_samples"), int(fcfg.get("sample_seed", 42)))
+    imgs = load_dataset(dcfg["hf_id"], f"{split}_balanced_images", split=split)
+    need = {qs[i]["imageId"] for i in rows}
+    id2img = {}
+    for ex in imgs:
+        if ex["id"] in need:
+            id2img[ex["id"]] = _rgb(ex["image"])
+    out = []
+    for i in rows:
+        ex = qs[i]
+        img = id2img.get(ex["imageId"])
+        if img is None:
+            continue
+        types = ex.get("types") or {}
+        spatial = _gqa_is_spatial(types, ex.get("semantic"))
+        out.append(
+            TaskItem(
+                id=f"gqa-{ex['id']}", family=fcfg["name"], dataset="gqa", row=i, question=ex["question"],
+                answer_type="text", gold=str(ex["answer"]), fmt="a single word or phrase", image=img,
+                subgroup=str(types.get("structural", "unknown")),
+                extra={"image_id": ex["imageId"], "structural": types.get("structural"), "semantic": types.get("semantic"),
+                       "detailed": types.get("detailed"), "spatial": "spatial" if spatial else "non-spatial",
+                       "semantic_str": ex.get("semanticStr")},
+            )
+        )
+    return out
+
+
+def load_cvbench_items(dcfg: dict, fcfg: dict, mcfg: dict) -> list[TaskItem]:
+    """CV-Bench (Cambrian-1): 2D Count / Relation and 3D Depth / Distance, all
+    multiple choice. `idx` restarts between the 2D and 3D files, so the item id
+    includes the type. Sampling is per task (max_per_task, seeded)."""
+    from datasets import load_dataset
+
+    ds = load_dataset(dcfg["hf_id"], split=fcfg.get("split", "test"))
+    meta = ds.select_columns(["type", "task"])
+    tasks = list(fcfg.get("tasks") or ["Count", "Relation", "Depth", "Distance"])
+    rng_seed = int(fcfg.get("sample_seed", 42))
+    rows: list[int] = []
+    for t in tasks:
+        idx = [i for i, m in enumerate(meta) if m["task"] == t]
+        rows += _sample_rows(len(idx), fcfg.get("max_per_task"), rng_seed, idx)
+    out = []
+    for i in sorted(rows):
+        ex = ds[i]
+        choices = [str(c) for c in ex["choices"]]
+        gold = str(ex["answer"]).strip().strip("()").upper()
+        out.append(
+            TaskItem(
+                id=f"cvbench-{ex['type']}-{ex['idx']}", family=fcfg["name"], dataset="cvbench", row=i,
+                question=ex["question"], answer_type="mc", gold=gold, choices=choices, image=_rgb(ex["image"]),
+                subgroup=ex["task"],
+                extra={"task": ex["task"], "type": ex["type"], "source": ex.get("source"),
+                       "spatial": "non-spatial" if ex["task"] == "Count" else "spatial"},
+            )
+        )
+    return out
+
+
 LOADERS: dict[str, Callable[[dict, dict, dict], list[TaskItem]]] = {
+    "gqa": load_gqa_items,
+    "cvbench": load_cvbench_items,
     "scienceqa": load_scienceqa_items,
     "mathvista": load_mathvista_items,
     "countbench": load_countbench_items,
