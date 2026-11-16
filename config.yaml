@@ -419,7 +419,7 @@ E3_4:
     examples_per_benchmark: 25    # random (seeded) sketch-vs-text wins and losses saved with all turns
     example_seed: 0
     group_by: {mathvista_geo: [answer_type], cvbench: [task], vstar: [subgroup]}
-    dev_runs: [check]             # pilot runs whose items were read while revising prompts (sensitivity check)
+    dev_runs: [check, check2]     # pilot runs whose items were read while revising prompts (sensitivity check)
     e3_3_run: full                # E3.3 run for the CV-Bench comparison with the visual-program agent
     grounding_check: true         # CV-Bench 3D: did zoom/mark cover the highlighted objects? (reads gold boxes)
     cover_frac: 0.5               # a zoom covers an object if it contains >= this share of the object's gold box
