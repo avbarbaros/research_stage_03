@@ -305,8 +305,11 @@ def _summarize(objects, items, checks, order_patterns, color_frac, thr, run_name
             sub = [i for i in its if f"oracle_{rule}" in i]
             a = [i["agent_correct"] for i in sub]
             o = [i[f"oracle_{rule}"] for i in sub]
+            dc = [i["direct_correct"] for i in sub]
+            vd = mcnemar_exact(dc, o)
             s["oracle"][f"{task}/{rule}"] = {"n": len(sub), "oracle_instances": _acc(o), "agent": _acc(a),
-                                             "direct": _acc(i["direct_correct"] for i in sub), **mcnemar_exact(a, o)}
+                                             "direct": _acc(dc), **mcnemar_exact(a, o),
+                                             "vs_direct": {"gains": vd["gains"], "losses": vd["losses"], "p_value": vd["p_value"]}}
     return s
 
 
@@ -331,11 +334,12 @@ def _markdown(s: dict) -> str:
     for k, v in s["selection_vs_answer"].items():
         L.append(f"| {k} | {v['n']} | {_pct(v['agent'])} | {_pct(v['direct'])} |")
     L += ["", "## 4. Oracle instances: the agent's rules applied to the gold boxes", "",
-          "| task / rule | n | oracle instances % | agent % | direct % | oracle gains / losses vs agent | McNemar p |",
+          "| task / rule | n | oracle instances % | agent % | direct % | oracle vs agent: gains / losses, p | oracle vs direct: gains / losses, p |",
           "|---|---|---|---|---|---|---|"]
     for k, v in s["oracle"].items():
         L.append(f"| {k} | {v['n']} | {_pct(v['oracle_instances'])} | {_pct(v['agent'])} | {_pct(v['direct'])} | "
-                 f"{v['gains']} / {v['losses']} | {v['p_value']:.2g} |")
+                 f"{v['gains']} / {v['losses']}, {v['p_value']:.2g} | "
+                 f"{v['vs_direct']['gains']} / {v['vs_direct']['losses']}, {v['vs_direct']['p_value']:.2g} |")
     L += ["", "Rules: `depth` = smaller median depth is closer to the camera (Depth task); for Distance, the option whose "
           "box is nearest the red reference by `distance_3d` (what the agent used: image-plane offset as a fraction of the "
           "diagonal combined with depth difference), `depth_only` (depth difference) or `image_plane_only` (2D offset).",

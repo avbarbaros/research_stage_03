@@ -34,7 +34,13 @@
   - a fallback answer that ignores the options.
   §4 documents each with examples.
 
+- **On CV-Bench 3D, the failing step was measured directly (§4.4).**
+  - The detector proposes the highlighted object for only about 55% of objects. When it does, the agent uses it 93–95% of the time.
+  - Given the gold boxes, the agent's own depth rules beat direct: **Depth 96.0% vs 87.2%**, **Distance 84.8% vs 80.4%**.
+
 **Main finding.** Breaking a question into tool calls multiplies the places it can fail. With a modern end-to-end VLM as the baseline, those failures cost more than the decomposition gains. The one exception is counting, where the end-to-end model is itself weak.
+
+Where the failing step can be measured (CV-Bench 3D), it is the **perception step**: finding the object the question refers to. The reasoning step (comparing depths) is not the problem. With the right objects, the tool-based answer would beat end-to-end prompting.
 
 ---
 
@@ -208,7 +214,7 @@ The run saves a random sample of 25 losses and 25 wins per benchmark (agent + fa
 | **Depth** (−2.4 pp, n.s.) | When `find_marked` confirms the right instances, depth comparison works. Losses: no candidate confirmed (falls back to the first detection); the marked object is not detected at all; a large box whose median depth reflects the background (a "books" box covering a whole shelf). |
 | **Distance** (−10.8 pp, hurts) | Three compounding issues: (1) `distance_3d` combines a 2D offset (fraction of the image diagonal) with relative depth, two scales that are not comparable; (2) the detector returns the same box for two categories (one box detected as both "car" and "bus"); (3) some programs still compare distance to the camera and return the reference object ("desk", "printer", "box"), which is not an option. |
 
-**The outline check (`find_marked`) is a weak link.** In the sampled losses it either answers "no" for every candidate (e.g. all three bowls in 2D-1337), or answers "yes" for the first candidate it is shown. Its accuracy can be measured directly: CV-Bench stores the boxes of the highlighted objects for its 3D tasks (§8).
+In the sampled losses, the outline check (`find_marked`) sometimes answers "no" for every candidate (e.g. all three bowls in 2D-1337) and sometimes "yes" to the first candidate it is shown. §4.4 measures how much this matters. Answer: much less than the detector does.
 
 ### 4.3 Where the agent wins
 
@@ -218,6 +224,65 @@ The run saves a random sample of 25 losses and 25 wins per benchmark (agent + fa
 
 These are exactly the cases where a tool computes something the end-to-end model does unreliably, and where only one or two tool calls are involved.
 
+### 4.4 Follow-up: was the highlighted object used? (measured against the gold boxes)
+
+CV-Bench stores the boxes of the highlighted objects for its 3D tasks. [`E3_3_marked_eval.py`](../E3_3_marked_eval.py) compares them with the boxes the agent actually used, read from the tool traces of the `full` run.
+
+- **Scope:** 500 Depth and Distance items, 1,250 highlighted objects.
+- **"Used the right object"** means IoU ≥ 0.5 with the gold box.
+- **No VLM is involved.** Only Depth Anything is run, for the oracle in table D.
+- **Box colours are read from the image.** CV-Bench does not store boxes in colour order: Depth boxes are stored red then blue, Distance boxes blue, green, then red (the reference object last). The script therefore identifies each gold box by the colour of the outline drawn around it, which succeeded for 100% of objects.
+
+**A. Where in the selection pipeline objects are lost**
+
+| | Depth (500 objects) | Distance (750 objects) |
+|---|---|---|
+| object searched for by the program | 100% | 99.7% |
+| detector returned at least one candidate | 81.0% | 83.2% |
+| **gold box among the candidates** | **54.6%** | **54.3%** |
+| gold box used by the program | 51.6% | 50.4% |
+| used, when the gold box was a candidate | 94.5% | 92.9% |
+
+Whenever the detector returned candidates for a highlighted object, the program checked them with `find_marked`. About 45% of highlighted objects are lost before any choice is made:
+- in 17–19% of cases the detector returns nothing for the object;
+- in 26–29% it returns boxes of that category, but none of them is the highlighted instance.
+
+**B. The outline check ("Is this X outlined by a red box?")**
+
+| | Checks | Gold instance: said yes | Other instance: said yes |
+|---|---|---|---|
+| Depth | 510 | 98.8% (of 259) | 33.9% (of 251) |
+| Distance | 759 | 98.7% (of 381) | 40.5% (of 378) |
+
+The check almost never rejects the right instance, but it accepts a wrong one 34–41% of the time: the suspected yes-bias. It costs relatively little, because a wrong candidate is accepted only when it is checked *before* the gold one. Given the gold box was a candidate, the right instance is still used 93–95% of the time (table A).
+
+**C. Does using the right objects matter?**
+
+| Items | n | Agent | Direct |
+|---|---|---|---|
+| Depth: every highlighted object used correctly | 65 | 96.9% | 93.8% |
+| Depth: at least one wrong | 185 | 80.5% | 84.9% |
+| Distance: every highlighted object used correctly | 40 | 80.0% | 87.5% |
+| Distance: at least one wrong | 210 | 66.2% | 79.0% |
+
+Only 26% (Depth) and 16% (Distance) of items have all their highlighted objects right. On those, the agent is far more accurate than on the rest. These subsets are small and not chosen at random: easier images are probably over-represented. Table D gives the controlled comparison.
+
+**D. Oracle instances: the agent's own rules applied to the gold boxes**
+
+| Task / rule | n | Gold boxes | Agent | Direct | Gold boxes vs agent: gains / losses, p |
+|---|---|---|---|---|---|
+| Depth: smaller median depth is closer | 250 | **96.0%** | 84.8% | 87.2% | 33 / 5, p = 4.3e-06 |
+| Distance: `distance_3d` (the agent's rule) | 250 | **84.8%** | 68.4% | 80.4% | 57 / 16, p = 1.5e-06 |
+| Distance: depth difference only | 250 | 84.4% | 68.4% | 80.4% | 70 / 30, p = 7.9e-05 |
+| Distance: image-plane offset only | 250 | 81.2% | 68.4% | 80.4% | 53 / 21, p = 2.6e-04 |
+
+How to read table D:
+- **The depth tool and the agent's rules are not the problem.** Given the right objects, Depth reaches 96.0% (direct: 87.2%), and the `distance_3d` rule criticised in §4.2 reaches 84.8% (direct: 80.4%).
+- **Depth carries most of the signal for Distance:** depth difference alone gives 84.4%, the image-plane offset alone 81.2%.
+- **Significance against direct was not computed in this run.** The script now reports it; rerunning it (one minute) gives the p-values. The descriptive differences are +8.8 pp (Depth) and +4.4 pp (Distance).
+
+**Caveat.** CV-Bench's 3D boxes come from Omni3D annotations (projected 3D boxes), whose extent can differ systematically from a 2D detector's box. IoU ≥ 0.5 may therefore undercount correct detections, so the 55% in table A is a lower bound. Rerunning with `--set E3_3.marked_eval.iou_threshold=0.3` shows how sensitive it is. Table D does not depend on this threshold.
+
 ---
 
 ## 5. Interpretation
@@ -226,7 +291,8 @@ These are exactly the cases where a tool computes something the end-to-end model
 2. **The end-to-end baseline is much stronger than in 2023.** ViperGPT reported gains over the end-to-end models of its time. Against a 2025 VLM at 63% (GQA) and 80% (CV-Bench), a program built from a small detector and the same 7B model as planner loses. The agent's advantage, where it exists, is confined to tasks where the end-to-end model is weak: counting.
 3. **Counting confirms E3.2 from the other side.** In E3.2, verbal chain-of-thought *hurt* counting by 10.6 pp, because enumerating objects in text loses track. Here detection-based counting *helps*, by 5.2 pp (not significant). For counting, computing with a tool beats reasoning in words.
 4. **Interpretability is the agent's real strength.** Every one of the 2,000 answers has a trace that shows where it went wrong. The failures in §4 are concrete engineering targets: constrain answers to the options, select instances by qualifier, keep context around crops, return on every path, offer relational filters. End-to-end answers offer none of this.
-5. **Small pilots were misleading.** `check3` (40 items) showed the agent +20 pp ahead, and Distance at +40 pp. The full run shows −2.7 pp overall and −10.8 pp on Distance. Direct accuracy on Distance was 40% in that pilot and 80% in the full run. The pilots were useful for debugging, not for estimating effects.
+5. **On CV-Bench 3D, the bottleneck is grounding the referred object, not the reasoning about it (§4.4).** The detector offers the highlighted object as a candidate only about 55% of the time. With the gold objects, the same depth rules beat end-to-end prompting (96.0% vs 87.2% on Depth). This is the Stage-5 perception bottleneck at the level of tools: the failure is in *seeing which object is meant*, not in reasoning about where it is. It also makes a precise target: better candidate generation (a larger detector, lower thresholds, or locating the drawn outline directly) would turn a loss into a gain on these tasks.
+6. **Small pilots were misleading.** `check3` (40 items) showed the agent +20 pp ahead, and Distance at +40 pp. The full run shows −2.7 pp overall and −10.8 pp on Distance. Direct accuracy on Distance was 40% in that pilot and 80% in the full run. The pilots were useful for debugging, not for estimating effects.
 
 ---
 
@@ -249,6 +315,7 @@ These are exactly the cases where a tool computes something the end-to-end model
 - **The prompt was developed on pilot items.** Two revisions were made after reading failures (§2.5). The sensitivity check shows this does not change the conclusion, but other prompt designs could do better.
 - **GQA exact-match scoring** penalises word-form differences ("donut" vs "donuts") for both conditions. Because agent answers come from crop queries with different wording, this adds noise to the comparison in both directions (§4.1).
 - **One run, greedy decoding**, 250 items per CV-Bench task, uncorrected subset tests.
+- **The instance-selection analysis (§4.4) uses IoU ≥ 0.5 against Omni3D-derived boxes**, which may undercount correct detections. It covers only CV-Bench 3D; the 2D Relation task stores no boxes.
 
 ---
 
@@ -257,7 +324,8 @@ These are exactly the cases where a tool computes something the end-to-end model
 | Item | Purpose |
 |---|---|
 | **E3.4** visual actions (crop / re-observe) | The roadmap's next step adds a cropping or drawing action that the model chooses during reasoning. The E3.3 runtime (`ImagePatch`, traces, sandbox) is the base. Small-object grounding (E3.2: −27 pp under CoT) and counting are the natural targets. |
-| Measure `find_marked` accuracy | CV-Bench stores the boxes of the highlighted objects for its 3D tasks. Compute how often `find_marked` picks the right one (IoU with the gold box). This separates instance-selection errors from depth errors on Depth and Distance. Analysis-only, no GPU. |
+| ~~Measure `find_marked` accuracy~~ | **Done (§4.4).** Detection, not selection or depth reasoning, is the bottleneck on CV-Bench 3D. Optional: rerun at IoU 0.3, and with the oracle-vs-direct test now in the script. |
+| Optional: better candidates | Lower detector thresholds or a larger Grounding DINO for `find_marked`, or locate the drawn coloured outline directly. Table D bounds the possible gain: up to 96.0% on Depth and 84.8% on Distance with these rules. |
 | Optional: targeted fixes | Constrain answers to the options (`best_text_match` for choose questions and fallbacks); select instances by qualifier; add a context margin for relational crop queries. Report as a variant, not as a re-tuned result. |
 | E3.5 faithfulness probe | Independent of E3.3; uses E3.1's rationales. |
 
@@ -276,6 +344,7 @@ These are exactly the cases where a tool computes something the end-to-end model
 python setup.py --skip-install                      # Grounding DINO, Depth Anything, GQA, CV-Bench
 python E3_3_visual_programs.py --set E3_3.run_name=full
 python E3_3_visual_programs.py --analyze-only --set E3_3.run_name=full   # rebuild tables, no GPU
+python E3_3_marked_eval.py --set E3_3.run_name=full                       # §4.4 (Depth Anything only; ~1 min on GPU)
 ```
 
 The run directory is `/content/drive/MyDrive/MMRM/research_stage_03/E3_3/full/`, next to `check`, `check2` and `check3`. The sensitivity check reads `check` and `check2` from there.
@@ -290,3 +359,4 @@ The run directory is `/content/drive/MyDrive/MMRM/research_stage_03/E3_3/full/`,
 | `program_errors_<bench>.jsonl` | every failed program |
 | `per_item.csv` | direct / agent / agent + fallback correctness per item |
 | `config.yaml`, `env.json` | exact configuration and library versions |
+| `marked_eval/summary.md`, `summary.json`, `objects.csv`, `items.csv` | §4.4: per highlighted object (searched, detected, gold among candidates, used, IoU) and per item (agent, direct, oracle correctness) |
