@@ -108,10 +108,21 @@ def smart_resize(height: int, width: int, factor: int = 28, min_pixels: int = 56
 # =============================================================================
 # Scoring
 # =============================================================================
+_FINAL_LINE = re.compile(r"(?m)^[ \t*]*ANSWER[ \t*]*:[ \t*]*(.+?)\s*$")  # upper-case marker at line start only
+
+
 def score(item: TaskItem, raw: str, iou_threshold: float = 0.5) -> dict:
     """Return {pred, parse_rule, correct, [iou]}. Unparseable output -> pred None, wrong."""
     t = item.answer_type
     if t == "mc":
+        # An explicit final "ANSWER: ..." line (E3.4 prompts) is read on its own first: the
+        # reasoning before it usually mentions several options, which makes matching option
+        # text against the whole output ambiguous ("ANSWER: white" would otherwise be lost).
+        lines = _FINAL_LINE.findall(raw or "")
+        if lines:
+            pred, rule = extract_choice(lines[-1], item.choices or [])
+            if pred is not None:
+                return {"pred": pred, "parse_rule": f"answer_line:{rule}", "correct": pred == item.gold}
         pred, rule = extract_choice(raw, item.choices or [])
         return {"pred": pred, "parse_rule": rule, "correct": pred is not None and pred == item.gold}
 

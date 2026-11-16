@@ -69,8 +69,10 @@ def extract_choice(text: str, choices: list[str]) -> tuple[str | None, str]:
     # If one option text contains another (e.g. "red" and "red and blue"),
     # keep only the longest matches.
     if len(found) > 1:
-        longest = max(len(choices[i]) for i in found)
-        found = [i for i in found if len(choices[i]) == longest]
+        # drop only matches contained in another match ("red" inside "red and blue");
+        # unrelated mentions ("red ... white") stay ambiguous
+        texts = {i: choices[i].strip().lower() for i in found}
+        found = [i for i in found if not any(j != i and texts[i] in texts[j] for j in found)]
     if len(found) == 1:
         return LETTERS[found[0]], "option_text"
 

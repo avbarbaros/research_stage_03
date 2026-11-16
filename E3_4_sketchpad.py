@@ -224,6 +224,8 @@ def analyze(cfg, run_dir: Path) -> dict:
                    "any_action_rate": accuracy([r["n_actions"] > 0 for r in R]),
                    "invalid_action_rate": (sum(r.get("n_invalid", 0) for r in R) / max(1, sum(r["n_actions"] for r in R))),
                    "forced_final_rate": accuracy([bool(r.get("forced_final")) for r in R]),
+                   # looping: the same action with the same arguments issued twice in one item
+                   "repeated_action_rate": accuracy([_has_repeat(r) for r in R]),
                    "families": {}}
             for f in fams + ["(no action)"]:
                 fi = [i for i in cid if (f in P[c][i].get("action_families", [])) or (f == "(no action)" and P[c][i]["n_actions"] == 0)]
@@ -233,6 +235,16 @@ def analyze(cfg, run_dir: Path) -> dict:
                 log["families"][f] = {"items": len(fi), "fire_rate": len(fi) / len(cid), "calls": calls,
                                       **_cmp([corr["text"][i] for i in fi], [corr[c][i] for i in fi], nb, al)}
             B["actions"][c] = log
+        # every output with no readable answer, with its last turns, for reading
+        with open(run_dir / f"no_answer_{bench}.jsonl", "w", encoding="utf-8") as f:
+            for c in P:
+                for i in ids:
+                    r = P[c].get(i)
+                    if r is not None and r.get("pred") is None:
+                        f.write(json.dumps({"condition": c, "id": i, "gold": r["gold"], "choices": r.get("choices"),
+                                            "forced_final": r.get("forced_final"), "finish_reason": r.get("finish_reason"),
+                                            "raw_output": r["raw_output"], "last_turns": (r.get("turns") or [])[-3:]},
+                                           ensure_ascii=False) + "\n")
         # E3.3 comparison on CV-Bench
         if bench == "cvbench" and a.get("e3_3_run") and "sketch" in P:
             e33 = run_dir.parent.parent / "E3_3" / a["e3_3_run"]
@@ -282,6 +294,11 @@ def analyze(cfg, run_dir: Path) -> dict:
         w.writerow(["benchmark", "id", "subgroup"] + [f"{c}_correct" for c in all_conds] + ["sketch_n_actions", "sketch_action_families"])
         w.writerows(csv_rows)
     return S
+
+
+def _has_repeat(r: dict) -> bool:
+    calls = [(t.get("action"), t.get("args")) for t in r.get("turns") or [] if t.get("action")]
+    return len(calls) != len(set(calls))
 
 
 def grounding_check(cfg, P, corr, ids) -> dict:
@@ -367,7 +384,8 @@ def _markdown(S) -> str:
         for c, lg in B["actions"].items():
             L += ["", f"**Actions in `{c}`:** {_pct(lg['any_action_rate'])}% of items used at least one action · "
                   f"{lg['mean_actions']:.2f} actions per item · invalid actions {_pct(lg['invalid_action_rate'])}% · "
-                  f"answer forced after the last action {_pct(lg['forced_final_rate'])}%", "",
+                  f"answer forced after the last action {_pct(lg['forced_final_rate'])}% · "
+                  f"same action repeated in an item {_pct(lg.get('repeated_action_rate'))}%", "",
                   "| action | items where it fired | fire rate % | calls | acc on those items: text → sketch | Δ vs text (gains/losses, p) |", "|---|---|---|---|---|---|"]
             for f, v in lg["families"].items():
                 L.append(f"| {f} | {v['items']} | {_pct(v['fire_rate'])} | {v['calls']} | {_pct(v['acc_a'])} → {_pct(v['acc_b'])} | "
@@ -398,7 +416,8 @@ def _markdown(S) -> str:
             L += ["", f"**Excluding {x['n_excluded']} pilot items:** sketch vs text {_c(x['sketch_vs_text'])}; sketch vs direct {_c(x['sketch_vs_direct'])}"]
         L.append("")
     L += ["**Gains from visual actions over the text-only control (p < 0.05):** " + ("; ".join(wins) if wins else "none"), "",
-          "Subset p-values are not corrected for multiple comparisons. Action images: `action_images/`; examples: `examples_<bench>_{wins,losses}.jsonl`.", ""]
+          "Subset p-values are not corrected for multiple comparisons. Action images: `action_images/`; examples: `examples_<bench>_{wins,losses}.jsonl`; "
+          "outputs without a readable answer: `no_answer_<bench>.jsonl`.", ""]
     return "\n".join(L)
 
 
