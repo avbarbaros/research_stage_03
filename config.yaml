@@ -230,12 +230,16 @@ E3_2:
 # -----------------------------------------------------------------------------
 E3_3:
   run_name: null
-  # The VLM shares the L4 with the detector and depth model: give vLLM less memory.
-  # ~16.6 GB of weights + KV cache at 0.82; leaves ~4 GB for Grounding DINO + Depth Anything.
+  # The VLM shares the L4 (22.0 GiB usable) with the detector and depth model.
+  # The check run at 0.82 with CUDA graphs left 0.26 GiB free (vLLM process 19.5 GiB:
+  # graphs and CUDA context are outside its budget) and Grounding DINO ran out of memory.
+  # Eager mode + 0.80 leaves ~3.5 GiB for the tools. If vLLM reports too little KV-cache
+  # memory at start-up, raise gpu_memory_utilization to 0.82.
   model_overrides:
-    gpu_memory_utilization: 0.82
-    max_model_len: 6144
-    max_num_seqs: 32
+    gpu_memory_utilization: 0.80
+    enforce_eager: true
+    max_model_len: 4096
+    max_num_seqs: 16
 
   run_benchmarks: [gqa, cvbench]
   benchmarks:
@@ -259,6 +263,7 @@ E3_3:
       text_threshold: 0.25
       nms_iou: 0.5
       max_detections: 20
+      max_side: 1024              # images are downscaled to this before detection (bounds GPU memory)
     depth:
       model: depth-anything/Depth-Anything-V2-Small-hf
     query:                        # crop-and-requery: the VLM asked about a cropped region
@@ -276,6 +281,7 @@ E3_3:
   executor:
     timeout_s: 60
     max_tool_calls: 30
+    retry_error_types: [OutOfMemoryError]   # infrastructure failures: retried on resume, not counted as program errors
     # agent_fb: when a program fails (exception, timeout, no answer), use the direct answer instead.
     # Both the strict agent and agent_fb are always reported.
 

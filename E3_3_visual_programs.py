@@ -127,9 +127,14 @@ def stage_execute(bench: str, items, vlm, tools: dict, cfg: dict, run_dir: Path)
     ecfg = cfg[EXP]
     programs = {r["id"]: r for r in read_jsonl(run_dir / f"programs_{bench}.jsonl")}
     path = run_dir / f"preds_{bench}_agent.jsonl"
-    todo = [it for it in items if it.id not in done_ids(path)]
-    print(f"\n=== {bench} / execute: {len(items) - len(todo)} done, {len(todo)} to run ===")
     xcfg = ecfg["executor"]
+    # Infrastructure failures (e.g. CUDA OOM in a tool) say nothing about the program:
+    # such items are run again on resume; the newest row per id is the one analysed.
+    retry = set(xcfg.get("retry_error_types") or [])
+    last = {r["id"]: r for r in read_jsonl(path)}
+    todo = [it for it in items if it.id not in last or last[it.id].get("error_type") in retry]
+    n_retry = sum(it.id in last for it in todo)
+    print(f"\n=== {bench} / execute: {len(items) - len(todo)} done, {len(todo)} to run ({n_retry} retries) ===")
     buf, t0 = [], time.time()
     for k, it in enumerate(todo, 1):
         prog = programs.get(it.id, {})
@@ -143,6 +148,10 @@ def stage_execute(bench: str, items, vlm, tools: dict, cfg: dict, run_dir: Path)
             row.update(pred=None, parse_rule="none", correct=False)
         else:
             row.update(**score(it, res["answer"]))
+            if it.answer_type == "mc" and row["pred"] is None:
+                # e.g. "towel" for options [mirror, television]: the program failed to answer the question asked
+                row.update(error=f"answer {res['answer']!r} is not one of the options {it.choices}",
+                           error_type="AnswerNotInOptions")
         buf.append(row)
         if len(buf) >= 20 or k == len(todo):
             append_jsonl(path, buf)
@@ -205,6 +214,9 @@ def analyze(cfg: dict, run_dir: Path) -> dict:
             continue
         cd = [bool(d[i]["correct"]) for i in ids]
         ca = [bool(a[i]["correct"]) for i in ids]
+        for i in ids:  # rows written before the AnswerNotInOptions check existed
+            if not a[i].get("error") and a[i].get("answer_type") == "mc" and a[i].get("pred") is None:
+                a[i]["error"], a[i]["error_type"] = f"answer {a[i]['raw_output']!r} is not an option", "AnswerNotInOptions"
         failed = [bool(a[i].get("error")) for i in ids]
         cf = [d_ if f else a_ for d_, a_, f in zip(cd, ca, failed)]
         conds = {"direct": cd, "agent": ca, "agent_fb": cf}
@@ -218,6 +230,8 @@ def analyze(cfg: dict, run_dir: Path) -> dict:
             "programs": {
                 "error_rate": accuracy(failed),
                 "error_types": _counts(r["error_type"] for r in recs if r.get("error")),
+                "infrastructure_errors": sum(r.get("error_type") in set((ecfg.get("executor") or {}).get("retry_error_types") or [])
+                                             for r in recs),
                 "planner_truncated_rate": accuracy([r.get("planner_finish") == "length" for r in recs]),
                 "degenerate_rate": accuracy([bool(r.get("degenerate")) for r in recs]),
                 "used_detector_rate": accuracy([bool(r.get("used_detector")) for r in recs]),
@@ -333,6 +347,10 @@ def _markdown(s: dict) -> str:
         L.append(f"| {b} | {_pct(p['error_rate'])} | {et} | {_pct(p['planner_truncated_rate'])} | {_pct(p['degenerate_rate'])} | "
                  f"{_pct(p['used_detector_rate'])} | {_pct(p['used_depth_rate'])} | {_pct(p['empty_find_rate'])} | "
                  f"{p['mean_tool_calls']:.1f} | {p['mean_seconds']:.1f} |")
+    infra = {b: e["programs"]["infrastructure_errors"] for b, e in s["benchmarks"].items() if e["programs"].get("infrastructure_errors")}
+    if infra:
+        L += ["", "**Warning:** infrastructure errors remain (" + ", ".join(f"{b}: {n}" for b, n in infra.items())
+              + "). They are not program failures; rerun the same command to retry them."]
     L += ["", "| benchmark | programs that ran: n · direct % · agent % | detector-based programs: n · direct % · agent % | query-only programs: n · direct % · agent % |",
           "|---|---|---|---|"]
     for b, e in s["benchmarks"].items():

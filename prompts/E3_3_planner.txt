@@ -31,7 +31,9 @@ class ImagePatch:
         """True if the two boxes overlap."""
 
 def distance(a: ImagePatch, b: ImagePatch) -> float:
-    """Pixel distance between the centres of two patches."""
+    """Pixel distance between the centres of two patches (in the image plane)."""
+def distance_3d(a: ImagePatch, b: ImagePatch) -> float:
+    """Approximate distance between two objects in the real scene (image position and depth combined)."""
 def bool_to_yesno(b: bool) -> str:
     """"yes" or "no"."""
 
@@ -40,7 +42,12 @@ Rules:
 - If the question lists options, return one of the options exactly as written.
 - Otherwise return a single word or short phrase, for example "yes", "no", "left", "red", "man".
 - Use find() and box geometry for left/right, above/below and counting questions. Use compute_depth() for closer/farther-from-the-camera questions. Use simple_query() on a found patch for attributes, materials, actions and names.
+- Use distance_3d() for "which object is closer to X" questions about distances between objects; use compute_depth() only for distance to the camera.
+- find() returns a list. Check that it is not empty, then use an element such as objects[0]. Never call ImagePatch methods on the list itself.
 - When find() returns [] for an object you need, fall back to image_patch.simple_query(<the original question>).
+- verify_property() needs a concrete value such as "red", "wooden" or "open", never a property name such as "color". To compare an attribute of two objects, ask simple_query() about each one and compare the answers.
+- For open questions, never invent a list of candidate answers; ask simple_query() on the relevant patch instead.
+- Every path through the program must return a string. If the question lists options, never return anything that is not one of them.
 - Output only the program in one ```python block.
 
 Examples:
@@ -137,6 +144,34 @@ def execute_command(image):
     if not chairs or not lamps:
         return image_patch.simple_query("Which object is closer to the camera, the chair or the lamp?")
     return "chair" if chairs[0].compute_depth() < lamps[0].compute_depth() else "lamp"
+```
+
+Question: Which object is closer to the sofa, the lamp or the plant?
+Options: lamp, plant
+```python
+def execute_command(image):
+    image_patch = ImagePatch(image)
+    sofas = image_patch.find("sofa")
+    lamps = image_patch.find("lamp")
+    plants = image_patch.find("plant")
+    if not sofas or not lamps or not plants:
+        return image_patch.best_text_match(["lamp", "plant"])
+    sofa = sofas[0]
+    return "lamp" if distance_3d(lamps[0], sofa) < distance_3d(plants[0], sofa) else "plant"
+```
+
+Question: Are the jacket and the hat the same color?
+Answer format: a single word or phrase
+```python
+def execute_command(image):
+    image_patch = ImagePatch(image)
+    jackets = image_patch.find("jacket")
+    hats = image_patch.find("hat")
+    if not jackets or not hats:
+        return image_patch.simple_query("Are the jacket and the hat the same color?")
+    jacket_color = jackets[0].simple_query("What color is this jacket?")
+    hat_color = hats[0].simple_query("What color is this hat?")
+    return bool_to_yesno(jacket_color.strip().lower() == hat_color.strip().lower())
 ```
 
 Now write the program for this question.

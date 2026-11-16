@@ -42,8 +42,23 @@ class Detector:
         self.torch = torch
 
     def __call__(self, image, name: str) -> list[tuple[list[float], float]]:
-        """Boxes [x1, y1, x2, y2] in `image` pixels with scores, best first."""
+        """Boxes [x1, y1, x2, y2] in `image` pixels with scores, best first.
+
+        Large images are downscaled to `max_side` first (the detector resizes to
+        ~800 px anyway; this bounds GPU memory). On CUDA out-of-memory the cache is
+        emptied and the call retried once at half that size."""
+        max_side = int(self.cfg.get("max_side", 1024))
+        try:
+            return self._detect(image, name, max_side)
+        except self.torch.cuda.OutOfMemoryError:
+            self.torch.cuda.empty_cache()
+            return self._detect(image, name, max_side // 2)
+
+    def _detect(self, image, name: str, max_side: int) -> list[tuple[list[float], float]]:
         torch = self.torch
+        scale = min(1.0, max_side / max(image.size))
+        if scale < 1.0:
+            image = image.resize((max(1, round(image.size[0] * scale)), max(1, round(image.size[1] * scale))))
         text = name.strip().lower().rstrip(".") + "."
         inputs = self.processor(images=image, text=text, return_tensors="pt").to(self.device)
         with torch.inference_mode():
@@ -69,7 +84,7 @@ class Detector:
         except ImportError:
             pass
         order = scores.argsort(descending=True)[: int(self.cfg.get("max_detections", 20))]
-        return [([float(v) for v in boxes[i].tolist()], float(scores[i])) for i in order]
+        return [([float(v) / scale for v in boxes[i].tolist()], float(scores[i])) for i in order]
 
 
 class DepthEstimator:
@@ -85,6 +100,13 @@ class DepthEstimator:
         self.torch = torch
 
     def __call__(self, image):
+        try:
+            return self._depth(image)
+        except self.torch.cuda.OutOfMemoryError:
+            self.torch.cuda.empty_cache()
+            return self._depth(image)
+
+    def _depth(self, image):
         import numpy as np
 
         torch = self.torch
@@ -264,6 +286,14 @@ def distance(a: ImagePatch, b: ImagePatch) -> float:
     return math.hypot(a.center_x - b.center_x, a.center_y - b.center_y)
 
 
+def distance_3d(a: ImagePatch, b: ImagePatch) -> float:
+    """Approximate distance between two objects in the scene: the offset between box
+    centres (as a fraction of the image diagonal) combined with their depth difference."""
+    diag = math.hypot(a.image_width, a.image_height) or 1.0
+    dx, dy = (a.center_x - b.center_x) / diag, (a.center_y - b.center_y) / diag
+    return math.sqrt(dx * dx + dy * dy + (a.compute_depth() - b.compute_depth()) ** 2)
+
+
 def bool_to_yesno(b: bool) -> str:
     return "yes" if b else "no"
 
@@ -324,7 +354,7 @@ def run_program(code: str | None, image, vlm, detector, depth, query_cfg: dict, 
         res.update(error="no execute_command found in planner output", error_type="NoProgram")
         return res
     ctx = Context(image=image, vlm=vlm, detector=detector, depth=depth, query_cfg=query_cfg, max_calls=max_calls)
-    ns = {"__builtins__": _SAFE_BUILTINS, "ImagePatch": ImagePatch, "distance": distance,
+    ns = {"__builtins__": _SAFE_BUILTINS, "ImagePatch": ImagePatch, "distance": distance, "distance_3d": distance_3d,
           "bool_to_yesno": bool_to_yesno, "math": math}
     t0 = time.time()
     _CTX = ctx
