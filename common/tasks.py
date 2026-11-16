@@ -255,7 +255,13 @@ def load_countbench_items(dcfg: dict, fcfg: dict, mcfg: dict) -> list[TaskItem]:
 
 def load_refcoco_items(dcfg: dict, fcfg: dict, mcfg: dict) -> list[TaskItem]:
     """RefCOCO (lmms-lab copy): one row per object with several referring
-    expressions; `expression_index` picks which one becomes the query."""
+    expressions; `expression_index` picks which one becomes the query.
+
+    The val split has 8,811 rows but only 8,416 distinct `question_id`s: 395
+    objects appear twice as exact duplicate rows (same image, box and
+    expressions). Items are keyed by question_id, so a duplicate drawn twice is
+    scored once (the E3.2 `full` sample of 1,000 rows has 991 distinct objects).
+    Rows are sampled before de-duplication to keep that sample reproducible."""
     from datasets import load_dataset
 
     ds = load_dataset(dcfg["hf_id"], split=fcfg.get("split", "val"))
