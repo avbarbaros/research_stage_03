@@ -295,6 +295,9 @@ E3_3:
     alpha: 0.05
     examples_per_benchmark: 25    # random (seeded) agent losses and wins saved with code + trace
     example_seed: 0
+    # Runs whose outputs were read while revising the planner prompt. Their items are
+    # also reported excluded from the main comparison (sensitivity check against tuning).
+    dev_runs: [check, check2]
     group_by:                     # subsets reported per benchmark (keys stored with each item)
       gqa: [structural, semantic, spatial]
       cvbench: [task]

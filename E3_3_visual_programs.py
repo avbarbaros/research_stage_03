@@ -271,6 +271,18 @@ def analyze(cfg: dict, run_dir: Path) -> dict:
                     "error_rate": accuracy([failed[j] for j in pos]),
                     "agent_vs_direct": _cmp(sd, sa, n_boot, alpha), "agent_fb_vs_direct": _cmp(sd, sf, n_boot, alpha),
                 }
+        # Sensitivity check: drop items whose programs were read while the planner prompt
+        # was being revised (analysis.dev_runs), so tuning cannot explain the result.
+        dev_ids = set()
+        for r in acfg.get("dev_runs") or []:
+            dev_ids |= {x["id"] for x in read_jsonl(run_dir.parent / r / f"preds_{bench}_agent.jsonl")}
+        keep = [j for j, i in enumerate(ids) if i not in dev_ids]
+        entry["excluding_dev_items"] = {
+            "dev_runs": list(acfg.get("dev_runs") or []), "n_excluded": len(ids) - len(keep), "n": len(keep),
+            "direct": accuracy([cd[j] for j in keep]), "agent": accuracy([ca[j] for j in keep]),
+            "agent_fb": accuracy([cf[j] for j in keep]),
+            "agent_fb_vs_direct": _cmp([cd[j] for j in keep], [cf[j] for j in keep], n_boot, alpha) if keep else None,
+        }
         summary["benchmarks"][bench] = entry
 
         # examples for reading: random (seeded) losses and wins, and every failed program
@@ -337,6 +349,14 @@ def _markdown(s: dict) -> str:
                     if g[f"{c}_vs_direct"]["verdict"] == "helps":
                         wins.append(f"{b} / {key}={v} ({c}: {100 * g[f'{c}_vs_direct']['diff']:+.2f} pp, "
                                     f"p = {g[f'{c}_vs_direct']['p_value']:.2g}, n = {g['n']})")
+    L += ["", "Excluding items inspected during prompt development (sensitivity check):", "",
+          "| benchmark | dev runs | items excluded | n | direct % | agent % | agent_fb % | Δ agent_fb (pp, p) |", "|---|---|---|---|---|---|---|---|"]
+    for b, e in s["benchmarks"].items():
+        x = e.get("excluding_dev_items") or {}
+        c = x.get("agent_fb_vs_direct")
+        L.append(f"| {b} | {', '.join(x.get('dev_runs') or []) or '—'} | {x.get('n_excluded', 0)} | {x.get('n', 0)} | "
+                 f"{_pct(x.get('direct'))} | {_pct(x.get('agent'))} | {_pct(x.get('agent_fb'))} | "
+                 + (f"{100 * c['diff']:+.2f} ({c['p_value']:.2g})" if c else "—") + " |")
     L += ["", "**Subsets where the agent significantly beats direct:** " + ("; ".join(wins) if wins else "none")]
 
     L += ["", "## Programs", "",
