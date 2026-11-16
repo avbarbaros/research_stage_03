@@ -1,4 +1,6 @@
 {question}
 {options_block}
+The objects mentioned in the question are in the image, even if they are small. If one is hard to see, look more carefully instead of concluding that it is absent.
+
 Think step by step. When you are ready, finish with a final line of the form:
 ANSWER: {answer_hint}

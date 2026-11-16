@@ -5,7 +5,13 @@ Before answering you can look at the image more closely with actions. The first 
 Available actions:
 {action_list}
 
-To use an action, write exactly one line starting with "ACTION:" and then stop; you will be shown the result. You may use up to {max_actions} actions, one at a time. Use them only when they help you see something you need.
+To use an action, write exactly one line starting with "ACTION:" and then stop; you will be shown the result. You may use up to {max_actions} actions, one at a time. Use them only when they help you see something you need:
+- zoom into a region around the object you need, much smaller than the whole image; zooming into the whole image shows nothing new.
+- mark needs the name of a specific object from the question, not a word like "object".
+- draw is for auxiliary lines in figures and diagrams.
+- do not repeat an action you have already used.
+
+The objects mentioned in the question are in the image, even if they are small. If one is hard to see, look closer instead of concluding that it is absent.
 
 Think step by step. When you are ready, finish with a final line of the form:
 ANSWER: {answer_hint}

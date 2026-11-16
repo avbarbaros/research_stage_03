@@ -332,7 +332,7 @@ E3_4:
   model_overrides:
     gpu_memory_utilization: 0.80
     enforce_eager: true
-    max_model_len: 8192
+    max_model_len: 10240          # 8192 in the first pilot; raised for larger zoom images
     max_num_seqs: 16
     max_images_per_prompt: 6      # first image + up to max_actions result images
 
@@ -372,7 +372,9 @@ E3_4:
 
   sketchpad:
     max_actions: 4
-    added_max_pixels: 401408      # result images are resized to at most this many pixels (~512 visual tokens)
+    added_max_pixels: 401408      # mark / draw / depth result images: at most this many pixels (~512 visual tokens)
+    zoom_max_pixels: 802816       # zoom results (~1024 tokens): a zoom into <= half the image then shows MORE detail than the original
+    zoom_max_area_frac: 0.5       # guard: zooms covering more of the image are refused (they show nothing new)
     zoom_min_px: 64               # zoom regions smaller than this (original pixels) are grown around their centre
     zoom_max_upscale: 4.0
     mark_max: 9                   # numbered boxes drawn by mark()
@@ -380,6 +382,7 @@ E3_4:
     image_quality: 70
     after_action: "Continue reasoning. Use another action if you need to, or finish with the ANSWER line."
     force_final: "You cannot use more actions. Finish now with the final line: ANSWER: {answer_hint}"
+    force_retry: "Do not write ACTION any more. Reply with only the final line: ANSWER: {answer_hint}"
     chunk_size: 128
 
   tools:
@@ -416,7 +419,7 @@ E3_4:
     examples_per_benchmark: 25    # random (seeded) sketch-vs-text wins and losses saved with all turns
     example_seed: 0
     group_by: {mathvista_geo: [answer_type], cvbench: [task], vstar: [subgroup]}
-    dev_runs: []                  # pilot runs whose items were read while revising prompts (sensitivity check)
+    dev_runs: [check]             # pilot runs whose items were read while revising prompts (sensitivity check)
     e3_3_run: full                # E3.3 run for the CV-Bench comparison with the visual-program agent
     grounding_check: true         # CV-Bench 3D: did zoom/mark cover the highlighted objects? (reads gold boxes)
     cover_frac: 0.5               # a zoom covers an object if it contains >= this share of the object's gold box

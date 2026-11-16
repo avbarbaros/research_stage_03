@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import csv
 import gc
+from collections import Counter
 import json
 import random
 from pathlib import Path
@@ -226,6 +227,9 @@ def analyze(cfg, run_dir: Path) -> dict:
                    "forced_final_rate": accuracy([bool(r.get("forced_final")) for r in R]),
                    # looping: the same action with the same arguments issued twice in one item
                    "repeated_action_rate": accuracy([_has_repeat(r) for r in R]),
+                   # guards (whole-image zoom, generic mark name, exact repeat) and ignored forced answers
+                   "rejections": dict(sorted(Counter(t["rejected"] for r in R for t in r["turns"] if t.get("rejected")).items())),
+                   "forced_retry_rate": accuracy([any(t.get("retry") for t in r["turns"]) for r in R]),
                    "families": {}}
             for f in fams + ["(no action)"]:
                 fi = [i for i in cid if (f in P[c][i].get("action_families", [])) or (f == "(no action)" and P[c][i]["n_actions"] == 0)]
@@ -385,7 +389,9 @@ def _markdown(S) -> str:
             L += ["", f"**Actions in `{c}`:** {_pct(lg['any_action_rate'])}% of items used at least one action · "
                   f"{lg['mean_actions']:.2f} actions per item · invalid actions {_pct(lg['invalid_action_rate'])}% · "
                   f"answer forced after the last action {_pct(lg['forced_final_rate'])}% · "
-                  f"same action repeated in an item {_pct(lg.get('repeated_action_rate'))}%", "",
+                  f"same action repeated in an item {_pct(lg.get('repeated_action_rate'))}% · "
+                  f"refused by guards: {', '.join(f'{k} {v}' for k, v in (lg.get('rejections') or {}).items()) or 'none'} · "
+                  f"forced answer needed a retry {_pct(lg.get('forced_retry_rate'))}%", "",
                   "| action | items where it fired | fire rate % | calls | acc on those items: text → sketch | Δ vs text (gains/losses, p) |", "|---|---|---|---|---|---|"]
             for f, v in lg["families"].items():
                 L.append(f"| {f} | {v['items']} | {_pct(v['fire_rate'])} | {v['calls']} | {_pct(v['acc_a'])} → {_pct(v['acc_b'])} | "

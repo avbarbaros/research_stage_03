@@ -78,6 +78,9 @@ def _font(size: int):
         return ImageFont.load_default()
 
 
+# mark() needs a real object name; these return a request for one instead of boxes
+GENERIC_NAMES = {"object", "objects", "thing", "things", "item", "items", "anything", "everything", "something", "all"}
+
 _PALETTE = [(255, 0, 0), (0, 160, 255), (0, 200, 0), (255, 140, 0), (200, 0, 200), (0, 200, 200), (255, 220, 0), (140, 90, 255)]
 
 
@@ -96,6 +99,7 @@ class ItemState:
     done: bool = False
     forced_final: bool = False
     canvas: Any = None          # first image with the drawings made so far
+    calls: set = field(default_factory=set)  # (action, normalised args) already executed
     final_text: str = ""
     out_tokens: int = 0
 
@@ -119,8 +123,9 @@ class ActionRunner:
         self.cfg = scfg
         self.tools = tools  # {"detector": callable or None, "depth": callable or None}
 
-    def _added(self, img):
-        return fit_pixels(img, int(self.cfg.get("added_max_pixels", 401408)), float(self.cfg.get("zoom_max_upscale", 4.0)))
+    def _added(self, img, max_pixels: int | None = None):
+        mp = int(max_pixels or self.cfg.get("added_max_pixels", 401408))
+        return fit_pixels(img, mp, float(self.cfg.get("zoom_max_upscale", 4.0)))
 
     def run(self, st: ItemState, name: str, args: str) -> dict:
         """Execute one action. Returns {"image": PIL or None, "note": str, "ok": bool, "family", "box"}."""
@@ -129,6 +134,11 @@ class ActionRunner:
             return {"image": None, "note": f"Unknown action {name}.", "ok": False, "family": None}
         if fam not in st.allowed:
             return {"image": None, "note": f"The action {name} is not available.", "ok": False, "family": fam}
+        key = (name, re.sub(r"\s+", "", args.lower()))
+        if key in st.calls:  # guard: an exact repeat shows nothing new
+            return {"image": None, "note": "You already used this exact action; its result is shown above. "
+                    "Do something different, or give the final answer.", "ok": False, "family": fam, "rejected": "repeat"}
+        st.calls.add(key)
         try:
             return {"family": fam, **getattr(self, f"_{name}")(st, args)}
         except Exception as e:  # noqa: BLE001 - a bad action is a result, not a crash
@@ -153,8 +163,13 @@ class ActionRunner:
         if y2 - y1 < m:
             c = (y1 + y2) / 2
             y1, y2 = max(0, c - m / 2), min(H, c + m / 2)
+        box = [round(v, 1) for v in (x1, y1, x2, y2)]
+        if (x2 - x1) * (y2 - y1) > float(self.cfg.get("zoom_max_area_frac", 0.5)) * W * H:
+            # guard: a zoom on (most of) the whole image shows less detail than the original, not more
+            return {"image": None, "note": "This region covers most of the image, so zooming would not show more detail. "
+                    "Zoom into a smaller region around the object you need.", "ok": False, "box": box, "rejected": "too_large"}
         crop = st.item.image.crop((int(x1), int(y1), int(x2), int(y2)))
-        return {"image": self._added(crop), "note": "", "ok": True, "box": [round(v, 1) for v in (x1, y1, x2, y2)]}
+        return {"image": self._added(crop, self.cfg.get("zoom_max_pixels")), "note": "", "ok": True, "box": box}
 
     def _mark(self, st: ItemState, args: str) -> dict:
         from PIL import ImageDraw
@@ -162,6 +177,9 @@ class ActionRunner:
         name = args.strip().strip("\"'").strip()
         if not name:
             raise ValueError("no object name")
+        if name.lower() in GENERIC_NAMES:  # guard: "object" finds arbitrary things
+            return {"image": None, "note": 'mark() needs the name of a specific object from the question, e.g. mark("cup").',
+                    "ok": False, "boxes": [], "rejected": "generic_name"}
         det = self.tools.get("detector")
         if det is None:
             raise RuntimeError("detector not loaded")
@@ -271,15 +289,21 @@ def run_chunk(items, vlm, runner: ActionRunner, allowed: list[str], template: st
         for s, o in zip(active, outs):
             s.out_tokens += o.n_tokens
             t = parse_turn(o.text)
-            if t["kind"] == "final" or turn == max_actions or not allowed:
+            if t["kind"] == "final" or not allowed:
                 s.final_text, s.done = o.text, True
                 s.turns.append({"text": o.text, "finish": o.finish_reason})
+                continue
+            if s.forced_final:  # still acting after the forced-answer request: ask once more (below)
+                s.turns.append({"text": t["text"], "finish": o.finish_reason, "ignored_action": t["name"]})
+                s.messages.append({"role": "assistant", "content": [{"type": "text", "text": t["text"]}]})
+                s.messages.append({"role": "user", "content": [{"type": "text", "text": scfg["force_retry"].replace(
+                    "{answer_hint}", answer_hint(s.item))}]})
                 continue
             res = runner.run(s, t["name"], t["args"])
             s.n_actions += 1
             rec = {"text": t["text"], "finish": o.finish_reason, "action": t["name"], "family": res.get("family"),
                    "args": t["args"], "ok": res["ok"], "note": res["note"]}
-            for k in ("box", "boxes", "points"):
+            for k in ("box", "boxes", "points", "rejected"):
                 if k in res:
                     rec[k] = res[k]
             if res.get("image") is not None and image_dir is not None:
@@ -294,4 +318,11 @@ def run_chunk(items, vlm, runner: ActionRunner, allowed: list[str], template: st
                 content.append({"type": "image", "image": res["image"]})
             content.append({"type": "text", "text": scfg["after_action"]})
             s.messages.append({"role": "user", "content": content})
+    retry = [s for s in states if not s.done]  # forced, but answered with another action
+    if retry:
+        outs = vlm.generate([Request(messages=s.messages) for s in retry], gp, f"{desc} final retry")
+        for s, o in zip(retry, outs):
+            s.out_tokens += o.n_tokens
+            s.final_text, s.done = o.text, True
+            s.turns.append({"text": o.text, "finish": o.finish_reason, "retry": True})
     return states
