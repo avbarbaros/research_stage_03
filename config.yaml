@@ -49,6 +49,9 @@ common:
     cvbench:
       hf_id: nyu-visionx/CV-Bench
       download_splits: [test]
+    vstar:
+      hf_id: craigwu/vstar_bench        # images are separate files in the repo (downloaded by the loader)
+      download_splits: [test]
 
 # -----------------------------------------------------------------------------
 # setup.py
@@ -70,7 +73,7 @@ setup:
     - "pandas"
     - "tqdm"
   download_model: true
-  download_datasets: [scienceqa, mathvista, countbench, refcoco, gqa, cvbench]
+  download_datasets: [scienceqa, mathvista, countbench, refcoco, gqa, cvbench, vstar]
   extra_models:                   # tool models used by E3.3 (downloaded only)
     - IDEA-Research/grounding-dino-tiny
     - depth-anything/Depth-Anything-V2-Small-hf
@@ -319,3 +322,102 @@ E3_3:
       {question}
       Options: {options}
       Answer with the option's letter from the given choices directly.
+
+# -----------------------------------------------------------------------------
+# E3.4 — Visual Sketchpad: re-observing a modified image mid-reasoning
+# -----------------------------------------------------------------------------
+E3_4:
+  run_name: null
+  # Several images per conversation + detector + depth model on the same L4.
+  model_overrides:
+    gpu_memory_utilization: 0.80
+    enforce_eager: true
+    max_model_len: 8192
+    max_num_seqs: 16
+    max_images_per_prompt: 6      # first image + up to max_actions result images
+
+  run_benchmarks: [mathvista_geo, cvbench, vstar]
+  benchmarks:
+    mathvista_geo:
+      dataset: mathvista
+      split: testmini
+      only_subgroups: [geometry problem solving]   # 208 items
+      max_samples: null
+      sample_seed: 42
+    cvbench:                      # the same 1,000 items as E3.3 (paired comparison with the E3.3 agent)
+      dataset: cvbench
+      split: test
+      tasks: [Count, Relation, Depth, Distance]
+      max_per_task: 250
+      sample_seed: 42
+    vstar:
+      dataset: vstar
+      split: test                 # 191 items: direct_attributes, relative_position
+      max_samples: null
+      sample_seed: 42
+
+  # direct and text are always run. Each sketch condition offers a set of action families:
+  #   zoom | mark (detector overlay) | draw (draw_line / draw_point) | depth (depth map)
+  conditions: [direct, text, sketch]
+  action_sets:
+    sketch: [zoom, mark, draw, depth]
+    zoom_only: [zoom]
+    mark_only: [mark]
+    draw_only: [draw]
+    depth_only: [depth]
+  # Single-action ablations: run only on benchmarks listed here (fill in after the main run,
+  # for benchmarks where sketch beats text), e.g. --set "E3_4.run_ablations_on=[vstar]"
+  run_ablations_on: []
+  ablation_conditions: [zoom_only, mark_only, draw_only, depth_only]
+
+  sketchpad:
+    max_actions: 4
+    added_max_pixels: 401408      # result images are resized to at most this many pixels (~512 visual tokens)
+    zoom_min_px: 64               # zoom regions smaller than this (original pixels) are grown around their centre
+    zoom_max_upscale: 4.0
+    mark_max: 9                   # numbered boxes drawn by mark()
+    save_action_images: true      # result images saved (JPEG) under <run>/action_images/ for inspection
+    image_quality: 70
+    after_action: "Continue reasoning. Use another action if you need to, or finish with the ANSWER line."
+    force_final: "You cannot use more actions. Finish now with the final line: ANSWER: {answer_hint}"
+    chunk_size: 128
+
+  tools:
+    device: cuda
+    detector:
+      model: IDEA-Research/grounding-dino-tiny
+      box_threshold: 0.35
+      text_threshold: 0.25
+      nms_iou: 0.5
+      max_detections: 20
+      max_side: 1024
+    depth:
+      model: depth-anything/Depth-Anything-V2-Small-hf
+
+  generation:
+    direct: {max_new_tokens: 32,  temperature: 0.0, top_p: 1.0}
+    turn:   {max_new_tokens: 768, temperature: 0.0, top_p: 1.0}   # each reasoning turn (text and sketch)
+
+  prompts:
+    system: null
+    direct_mc: |-
+      {question}
+      Options: {options}
+      Answer with the option's letter from the given choices directly.
+    direct_open: |-
+      {question}
+      Answer with {format} only.
+    sketch_file: prompts/E3_4_sketchpad.txt   # {question} {options_block} {action_list} {max_actions} {width} {height} {answer_hint}
+    text_file: prompts/E3_4_text.txt          # same structure without actions: the control condition
+
+  analysis:
+    bootstrap_samples: 2000
+    alpha: 0.05
+    examples_per_benchmark: 25    # random (seeded) sketch-vs-text wins and losses saved with all turns
+    example_seed: 0
+    group_by: {mathvista_geo: [answer_type], cvbench: [task], vstar: [subgroup]}
+    dev_runs: []                  # pilot runs whose items were read while revising prompts (sensitivity check)
+    e3_3_run: full                # E3.3 run for the CV-Bench comparison with the visual-program agent
+    grounding_check: true         # CV-Bench 3D: did zoom/mark cover the highlighted objects? (reads gold boxes)
+    cover_frac: 0.5               # a zoom covers an object if it contains >= this share of the object's gold box
+    iou_threshold: 0.5            # a mark detection is the object if IoU >= this with the gold box

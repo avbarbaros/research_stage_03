@@ -1,0 +1,11 @@
+{question}
+{options_block}
+Before answering you can look at the image more closely with actions. The first image is {width} x {height} pixels; every coordinate you write refers to the first image, with (0, 0) at its top-left corner.
+
+Available actions:
+{action_list}
+
+To use an action, write exactly one line starting with "ACTION:" and then stop; you will be shown the result. You may use up to {max_actions} actions, one at a time. Use them only when they help you see something you need.
+
+Think step by step. When you are ready, finish with a final line of the form:
+ANSWER: {answer_hint}

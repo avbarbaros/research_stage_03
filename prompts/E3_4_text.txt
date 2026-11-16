@@ -1,0 +1,4 @@
+{question}
+{options_block}
+Think step by step. When you are ready, finish with a final line of the form:
+ANSWER: {answer_hint}

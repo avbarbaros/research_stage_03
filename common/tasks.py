@@ -380,7 +380,43 @@ def load_cvbench_items(dcfg: dict, fcfg: dict, mcfg: dict) -> list[TaskItem]:
     return out
 
 
+_VSTAR_OPT = re.compile(r"^\(([A-J])\)\s*(.+)$")
+
+
+def load_vstar_items(dcfg: dict, fcfg: dict, mcfg: dict) -> list[TaskItem]:
+    """V*Bench (Wu & Xie, 2023): 191 high-resolution images with small targets;
+    'direct_attributes' and 'relative_position' multiple-choice questions.
+    The table stores image *paths*; the files are downloaded from the dataset repo.
+    The stored prompt ("question / (A) .. / Answer with the option's letter ...")
+    is split into question and options so the experiment's own templates apply."""
+    from datasets import load_dataset
+    from huggingface_hub import hf_hub_download
+    from PIL import Image
+
+    ds = load_dataset(dcfg["hf_id"], split=fcfg.get("split", "test"))
+    rows = _sample_rows(len(ds), fcfg.get("max_samples"), int(fcfg.get("sample_seed", 42)))
+    out = []
+    for i in rows:
+        ex = ds[i]
+        lines = [l.strip() for l in str(ex["text"]).splitlines() if l.strip()]
+        opts = [m.groups() for m in (_VSTAR_OPT.match(l) for l in lines) if m]
+        q_lines = [l for l in lines if not _VSTAR_OPT.match(l) and not l.lower().startswith("answer with")]
+        if not opts:
+            continue
+        path = hf_hub_download(dcfg["hf_id"], filename=ex["image"], repo_type="dataset")
+        out.append(
+            TaskItem(
+                id=f"vstar-{ex['question_id']}", family=fcfg["name"], dataset="vstar", row=i,
+                question=" ".join(q_lines), answer_type="mc", gold=str(ex["label"]).strip().strip("()").upper(),
+                choices=[t for _, t in opts], image=_rgb(Image.open(path)), subgroup=ex["category"],
+                extra={"image_file": ex["image"]},
+            )
+        )
+    return out
+
+
 LOADERS: dict[str, Callable[[dict, dict, dict], list[TaskItem]]] = {
+    "vstar": load_vstar_items,
     "gqa": load_gqa_items,
     "cvbench": load_cvbench_items,
     "scienceqa": load_scienceqa_items,
@@ -395,7 +431,11 @@ def load_family(name: str, fcfg: dict, cfg: dict) -> list[TaskItem]:
     if ds_key not in LOADERS:
         raise ValueError(f"no loader for dataset {ds_key!r}; available: {sorted(LOADERS)}")
     fcfg = {**fcfg, "name": name}
-    return LOADERS[ds_key](cfg["common"]["datasets"][ds_key], fcfg, cfg["common"]["model"])
+    items = LOADERS[ds_key](cfg["common"]["datasets"][ds_key], fcfg, cfg["common"]["model"])
+    keep = fcfg.get("only_subgroups")  # e.g. MathVista's "geometry problem solving"
+    if keep:
+        items = [it for it in items if it.subgroup in set(keep)]
+    return items
 
 
 def render_prompt(item: TaskItem, templates: dict, mode: str) -> str:

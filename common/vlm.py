@@ -19,8 +19,19 @@ from tqdm import tqdm
 
 @dataclass
 class Request:
-    text: str
+    """One prompt. Either a single user turn (`text` + optional `image`) or a whole
+    conversation (`messages`): [{"role": "user" | "assistant", "content": [
+    {"type": "image", "image": PIL.Image} | {"type": "text", "text": str}, ...]}, ...].
+    Images in `messages` are passed to the model in order of appearance."""
+
+    text: str = ""
     image: Any = None  # PIL.Image or None
+    messages: list | None = None
+
+    def images(self) -> list:
+        if self.messages is None:
+            return [self.image] if self.image is not None else []
+        return [c["image"] for m in self.messages for c in m["content"] if c.get("type") == "image"]
 
 
 @dataclass
@@ -72,6 +83,12 @@ class VLM:
         messages = []
         if self.system_prompt:
             messages.append({"role": "system", "content": [{"type": "text", "text": self.system_prompt}]})
+        if req.messages is not None:
+            for m in req.messages:
+                content = [{"type": "image"} if c.get("type") == "image" else {"type": "text", "text": c["text"]}
+                           for c in m["content"]]
+                messages.append({"role": m["role"], "content": content})
+            return self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         content = []
         if req.image is not None:
             content.append({"type": "image"})
@@ -91,7 +108,7 @@ class VLM:
             gpu_memory_utilization=float(c.get("gpu_memory_utilization", 0.9)),
             enforce_eager=bool(c.get("enforce_eager", False)),
             max_num_seqs=int(c.get("max_num_seqs", 64)),
-            limit_mm_per_prompt={"image": 1},
+            limit_mm_per_prompt={"image": int(c.get("max_images_per_prompt", 1))},
             mm_processor_kwargs={
                 "min_pixels": c.get("min_pixels"),
                 "max_pixels": c.get("max_pixels"),
@@ -111,8 +128,9 @@ class VLM:
         inputs = []
         for r in reqs:
             item: dict[str, Any] = {"prompt": self.build_prompt(r)}
-            if r.image is not None:
-                item["multi_modal_data"] = {"image": r.image}
+            imgs = r.images()
+            if imgs:
+                item["multi_modal_data"] = {"image": imgs[0] if len(imgs) == 1 else imgs}
             inputs.append(item)
         results = self.llm.generate(inputs, sp, use_tqdm=progress)
         outs = []
@@ -151,7 +169,7 @@ class VLM:
         for start in tqdm(range(0, len(reqs), bs), desc=desc, disable=not progress):
             batch = reqs[start : start + bs]
             texts = [self.build_prompt(r) for r in batch]
-            images = [r.image for r in batch if r.image is not None]
+            images = [im for r in batch for im in r.images()]
             enc = self.processor(
                 text=texts,
                 images=images or None,

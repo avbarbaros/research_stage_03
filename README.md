@@ -10,9 +10,10 @@ E3_1_mcot_baseline.py    E3.1 two-stage rationale-then-answer vs direct answerin
 E3_2_cot_harm_audit.py   E3.2 direct vs CoT on math / science / counting / grounding
 E3_3_visual_programs.py  E3.3 ViperGPT-style visual programs (detector + depth + crop queries) vs direct, on GQA and CV-Bench
 E3_3_marked_eval.py      E3.3 follow-up: did the agent pick the highlighted CV-Bench 3D objects? (gold boxes, no VLM)
-prompts/                 long prompt templates (E3_3_planner.txt: the ImagePatch API and worked examples)
+E3_4_sketchpad.py        E3.4 Visual Sketchpad: multi-turn reasoning with zoom / mark / draw / depth actions vs text-only reasoning
+prompts/                 long prompt templates (E3_3_planner.txt: ImagePatch API; E3_4_sketchpad.txt / E3_4_text.txt)
 docs/                    results write-ups: docs/E3_1_results.md, docs/E3_2_results.md, docs/E3_3_results.md
-common/                  shared code: config, dataset loaders + scoring (tasks.py), visual-program runtime (visprog.py), VLM wrapper (vLLM / transformers),
+common/                  shared code: config, dataset loaders + scoring (tasks.py), visual-program runtime (visprog.py), sketchpad loop (sketchpad.py), VLM wrapper (vLLM / transformers),
                          answer parsing, metrics
 outputs/<EXP>/<run>/     results (git-ignored)
 ```
