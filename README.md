@@ -11,6 +11,7 @@ E3_2_cot_harm_audit.py   E3.2 direct vs CoT on math / science / counting / groun
 E3_3_visual_programs.py  E3.3 ViperGPT-style visual programs (detector + depth + crop queries) vs direct, on GQA and CV-Bench
 E3_3_marked_eval.py      E3.3 follow-up: did the agent pick the highlighted CV-Bench 3D objects? (gold boxes, no VLM)
 E3_4_sketchpad.py        E3.4 Visual Sketchpad: multi-turn reasoning with zoom / mark / draw / depth actions vs text-only reasoning
+E3_5_faithfulness.py     E3.5 faithfulness probe: are 200 correct E3.1 rationales supported by the image? (auto claim check + human annotation sheet)
 prompts/                 long prompt templates (E3_3_planner.txt: ImagePatch API; E3_4_sketchpad.txt / E3_4_text.txt)
 docs/                    results write-ups: docs/E3_1_results.md, docs/E3_2_results.md, docs/E3_3_results.md, docs/E3_4_results.md
 common/                  shared code: config, dataset loaders + scoring (tasks.py), visual-program runtime (visprog.py), sketchpad loop (sketchpad.py), VLM wrapper (vLLM / transformers),
@@ -32,6 +33,9 @@ python E3_1_mcot_baseline.py --set E3_1.max_samples=100 --set E3_1.run_name=quic
 python E3_1_mcot_baseline.py --set E3_1.run_name=full_img                           # 2,017 image items (image_only: true)
 python E3_2_cot_harm_audit.py --set E3_2.run_name=full                              # four task families
 python E3_3_visual_programs.py --set E3_3.run_name=full                             # GQA + CV-Bench, agent vs direct
+python E3_4_sketchpad.py --set E3_4.run_name=full                                   # MathVista geo + CV-Bench + V*, sketch vs text vs direct
+python E3_5_faithfulness.py --set E3_5.run_name=full                                # needs E3_1/full_img_a64; writes annotation_sheet.html
+python E3_5_faithfulness.py --analyze-only --set E3_5.run_name=full                 # after copying labels_<name>.json into <run>/labels/
 ```
 
 Any config value can be overridden with `--set key.path=value` (repeatable).

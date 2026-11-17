@@ -96,10 +96,15 @@ def load_scienceqa(
     image_only: bool = False,
     max_samples: int | None = None,
     sample_seed: int = 42,
+    rows: list[int] | None = None,
 ) -> list[SQAItem]:
+    """Load ScienceQA items. `rows` loads exactly those row indices (as used in item ids)
+    and ignores image_only / max_samples."""
     from datasets import load_dataset
 
     ds = load_dataset(hf_id, split=split)
+    if rows is not None:
+        return [_make_item(ds[i], split, i) for i in sorted(rows)]
     rows = list(range(len(ds)))
     if image_only:
         # Reading only the image column metadata is slow on HF Image features;
@@ -112,28 +117,26 @@ def load_scienceqa(
         rng = random.Random(sample_seed)
         rows = sorted(rng.sample(rows, max_samples))
 
-    items = []
-    for i in rows:
-        ex = ds[i]
-        img = ex["image"]
-        if img is not None and img.mode != "RGB":
-            img = img.convert("RGB")
-        items.append(
-            SQAItem(
-                id=f"{split}-{i}",
-                row=i,
-                question=ex["question"],
-                choices=list(ex["choices"]),
-                answer_idx=int(ex["answer"]),
-                hint=ex.get("hint") or "",
-                lecture=ex.get("lecture") or "",
-                solution=ex.get("solution") or "",
-                subject=ex.get("subject") or "",
-                grade=ex.get("grade") or "",
-                topic=ex.get("topic") or "",
-                category=ex.get("category") or "",
-                skill=ex.get("skill") or "",
-                image=img,
-            )
-        )
-    return items
+    return [_make_item(ds[i], split, i) for i in rows]
+
+
+def _make_item(ex: dict, split: str, i: int) -> SQAItem:
+    img = ex["image"]
+    if img is not None and img.mode != "RGB":
+        img = img.convert("RGB")
+    return SQAItem(
+        id=f"{split}-{i}",
+        row=i,
+        question=ex["question"],
+        choices=list(ex["choices"]),
+        answer_idx=int(ex["answer"]),
+        hint=ex.get("hint") or "",
+        lecture=ex.get("lecture") or "",
+        solution=ex.get("solution") or "",
+        subject=ex.get("subject") or "",
+        grade=ex.get("grade") or "",
+        topic=ex.get("topic") or "",
+        category=ex.get("category") or "",
+        skill=ex.get("skill") or "",
+        image=img,
+    )

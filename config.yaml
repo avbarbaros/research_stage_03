@@ -424,3 +424,61 @@ E3_4:
     grounding_check: true         # CV-Bench 3D: did zoom/mark cover the highlighted objects? (reads gold boxes)
     cover_frac: 0.5               # a zoom covers an object if it contains >= this share of the object's gold box
     iou_threshold: 0.5            # a mark detection is the object if IoU >= this with the gold box
+
+# =============================================================================
+# E3.5 — Faithfulness probe: are correct E3.1 rationales supported by the image?
+# =============================================================================
+# Roadmap: "For 200 correct answers from E3.1, manually or semi-automatically check
+# whether the rationale is actually supported by the image."
+#   1. sample   200 correct two_stage items from an E3.1 run (stratified, proportional)
+#   2. auto     the model lists the visual claims of each rationale (text only), then each
+#               claim is checked against the image in a fresh call; plus a direct answer
+#               WITHOUT the image (does the item need the image at all?)
+#   3. human    annotation_sheet.html (self-contained, blind to the automatic verdicts);
+#               export labels_<annotator>.json into <run>/labels/
+#   4. analyze  human rate (primary) with Wilson CI; automatic judge vs human agreement
+E3_5:
+  run_name: null
+  source:
+    e3_1_run: full_img_a64        # E3.1 run whose preds_two_stage.jsonl holds the rationales
+    condition: two_stage
+  sample:
+    n: 200
+    seed: 0
+    stratify_by: [stated, subject]   # stated = the rationale names an option letter (E3.1 §5.4)
+  model_overrides: {}             # e.g. a different checker model; default = common.model (the model that wrote the rationales)
+  max_claims: 8                   # visual claims kept per rationale (in the order listed)
+  generation:
+    claims: {max_new_tokens: 512, temperature: 0.0, top_p: 1.0}
+    verify: {max_new_tokens: 8, temperature: 0.0, top_p: 1.0}
+    direct: {max_new_tokens: 64, temperature: 0.0, top_p: 1.0}   # same limit as E3.1 answers
+  prompts:
+    system: null
+    # Fields: {question} {context} {options} {rationale}. Literal braces are fine (filled with str.replace).
+    claims: |-
+      Below are a question about an image and a solution written by someone who looked at the image.
+
+      Question: {question}
+      Context: {context}
+      Options: {options}
+      Solution: {rationale}
+
+      List every statement in the solution that describes the image itself: objects, text, labels, numbers, colours, positions, highlighted regions or patterns that the image shows. Rewrite each one as a short, self-contained sentence about the image. Do not list general knowledge, definitions, or conclusions that do not describe the image.
+      For each statement, also say whether the solution's final answer depends on it.
+      Reply with JSON only, in this form:
+      [{"claim": "The map highlights a state in the north-east.", "answer_depends": true}]
+      If the solution says nothing about the image, reply with [].
+    # Fields: {claim} {context}
+    verify: |-
+      Text given with this image: {context}
+      Statement about the image: "{claim}"
+      Look at the image carefully. Is the statement true for this image? Answer with one word: true, false, or unclear.
+    # direct answer without the image: E3_1.prompts.direct is used, so the wording is identical to E3.1
+  sheet:
+    image_max_side: 900           # images embedded in the annotation sheet (JPEG)
+    image_quality: 85
+    show_gold_solution: true      # ScienceQA's reference solution, collapsed, for checking non-visual steps
+  analysis:
+    alpha: 0.05
+    examples: 15                  # unfaithful items quoted in summary.md
+    primary_annotator: null       # null = the annotator with the most labels; others give inter-annotator kappa
