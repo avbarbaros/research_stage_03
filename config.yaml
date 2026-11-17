@@ -463,11 +463,10 @@ E3_5:
       Options: {options}
       Solution: {rationale}
 
-      List every statement in the solution that describes the image itself: objects, text, labels, numbers, colours, positions, highlighted regions or patterns that the image shows. Rewrite each one as a short, self-contained sentence about the image. Do not list general knowledge, definitions, or conclusions that do not describe the image.
-      For each statement, also say whether the solution's final answer depends on it.
-      Reply with JSON only, in this form:
-      [{"claim": "The map highlights a state in the north-east.", "answer_depends": true}]
-      If the solution says nothing about the image, reply with [].
+      List every statement in the solution about what the image shows: which objects, animals, plants or materials are in it, text or numbers written in it, colours, counts, positions, and which region is highlighted. A statement counts even if it is written as a plain fact (for example, naming the animal or the highlighted state). Rewrite each one as a short, self-contained sentence about the image, in your own words. Do not list general knowledge or definitions that do not say what the image shows.
+      For each statement, say whether the solution's final answer depends on it.
+      Reply with JSON only: a list of objects with the keys "claim" (string) and "answer_depends" (true or false).
+      If the solution says nothing about what the image shows, reply with [].
     # Fields: {claim} {context}
     verify: |-
       Text given with this image: {context}
@@ -481,4 +480,6 @@ E3_5:
   analysis:
     alpha: 0.05
     examples: 15                  # unfaithful items quoted in summary.md
+    # Cross-check of the claim extractor: rationales with no extracted claim that still refer to the image
+    mentions_image_regex: '\b(image|picture|photo|photograph|map|diagram|figure|drawing|illustration|shown|shows|pictured|depicted|highlighted|shaded|colou?red|label(?:l)?ed)\b'
     primary_annotator: null       # null = the annotator with the most labels; others give inter-annotator kappa

@@ -41,6 +41,7 @@ Usage
   python E3_5_faithfulness.py --set E3_5.run_name=full                 # sample + auto + sheet + analysis
   python E3_5_faithfulness.py --sheet-only --set E3_5.run_name=full    # rebuild the sheet (no GPU)
   python E3_5_faithfulness.py --analyze-only --set E3_5.run_name=full  # after adding labels (no GPU)
+  python E3_5_faithfulness.py --redo-auto --set E3_5.run_name=full     # rerun claims + verify only (prompt change)
 """
 from __future__ import annotations
 
@@ -427,6 +428,14 @@ def analyze(cfg: dict, run_dir: Path) -> dict:
         }
     if NI:
         summ["noimg"] = {"correct": _rate([NI[i]["correct"] for i in ids if i in NI], alpha)}
+    missed = []
+    if V:
+        # Cross-check of the claim extractor: rationales with no extracted claim that still refer to the image
+        rx = re.compile(e["analysis"].get("mentions_image_regex") or r"\bimage\b", re.IGNORECASE)
+        none = [i for i in ids if i in V and not V[i]["claims"]]
+        missed = [i for i in none if rx.search(S[i].get("rationale") or "")]
+        summ["auto"]["no_claims_but_mentions_image"] = _rate([i in missed for i in none], alpha)
+        summ["auto"]["rationale_mentions_image"] = _rate([bool(rx.search(S[i].get("rationale") or "")) for i in ids], alpha)
 
     # ---- human labels
     H = load_labels(run_dir)
@@ -520,7 +529,10 @@ def analyze(cfg: dict, run_dir: Path) -> dict:
                                  "auto_claims": V.get(i, {}).get("claims")})
 
     # ---- files
-    for name, rows in (("unfaithful_examples.jsonl", examples), ("disagreements.jsonl", disagreements)):
+    no_claims = [{"id": i, "subject": S[i].get("subject"), "topic": S[i].get("topic"), "rationale": S[i].get("rationale")}
+                 for i in missed]
+    for name, rows in (("unfaithful_examples.jsonl", examples), ("disagreements.jsonl", disagreements),
+                       ("no_claims_but_mentions_image.jsonl", no_claims)):
         p = run_dir / name
         p.unlink(missing_ok=True)
         if rows:
@@ -580,6 +592,10 @@ def render_md(s: dict, examples: list, n_ex: int) -> str:
         L += ["", f"Visual claims per rationale: {a['claims_per_item']:.2f} · claim verdicts: "
               + ", ".join(f"{k} {v}" for k, v in sorted(a["claim_verdicts"].items(), key=lambda kv: str(kv[0])))
               + f" · claim lists not parsed: {a['claims_parse_failed']} · truncated: {a['claims_truncated']}", ""]
+        if "no_claims_but_mentions_image" in a:
+            L += [f"Extractor cross-check: rationales that refer to the image (word list) {_p(a['rationale_mentions_image'])}; "
+                  f"of the rationales with **no** extracted claim, {_p(a['no_claims_but_mentions_image'])} still refer to it "
+                  "(listed in `no_claims_but_mentions_image.jsonl`: possible missed claims).", ""]
     if s.get("noimg"):
         L += [f"Answered correctly **without** the image (E3.1 direct prompt): {_p(s['noimg']['correct'])}", ""]
     j = s.get("judge_vs_human")
@@ -600,7 +616,8 @@ def render_md(s: dict, examples: list, n_ex: int) -> str:
             L += [f"- **{x['id']}** ({x['subject']} / {x['topic']}; {', '.join(x['errors'] or []) or '—'}): {x['note'] or ''}",
                   f"  > {rat[:400]}{'…' if len(rat) > 400 else ''}"]
         L.append("")
-    L.append("Files: `per_item.csv`, `unfaithful_examples.jsonl`, `disagreements.jsonl` (automatic vs human).")
+    L.append("Files: `per_item.csv`, `unfaithful_examples.jsonl`, `disagreements.jsonl` (automatic vs human), "
+             "`no_claims_but_mentions_image.jsonl`.")
     return "\n".join(L) + "\n"
 
 
@@ -609,6 +626,9 @@ def main() -> None:
     ap = base_argparser(__doc__.splitlines()[0])
     ap.add_argument("--analyze-only", action="store_true", help="recompute summary from saved files and labels; no GPU or dataset")
     ap.add_argument("--sheet-only", action="store_true", help="(re)build annotation_sheet.html; no GPU")
+    ap.add_argument("--redo-auto", action="store_true",
+                    help="delete claims.jsonl and verify.jsonl first (after changing the claims/verify prompts); "
+                         "the sample, noimg answers, sheet and human labels are kept")
     args = ap.parse_args()
 
     cfg = load_config(args.config, args.set)
@@ -625,6 +645,11 @@ def main() -> None:
         print((run_dir / "summary.md").read_text(encoding="utf-8"))
         return
 
+    if args.redo_auto and not args.sheet_only:
+        for name in ("claims.jsonl", "verify.jsonl"):
+            if (run_dir / name).exists():
+                (run_dir / name).rename(run_dir / f"{name}.prev")   # kept for comparison
+                print(f"moved {name} -> {name}.prev")
     if not args.sheet_only:
         save_resolved_config(cfg, run_dir)
     sample = stage_sample(cfg, run_dir)
