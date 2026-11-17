@@ -447,7 +447,13 @@ E3_5:
     seed: 0
     stratify_by: [stated, subject]   # stated = the rationale names an option letter (E3.1 §5.4)
   model_overrides: {}             # e.g. a different checker model; default = common.model (the model that wrote the rationales)
-  max_claims: 8                   # visual claims kept per rationale (in the order listed)
+  # How the automatic pass finds the rationale's statements about the image:
+  #   sentences  every sentence of the rationale is checked against the image (correct / wrong / not about the image)
+  #   claims     the model first lists the visual claims (text only), then each is checked. Not used for the
+  #              reported run: the 7B extractor returned [] for rationales that plainly describe the image.
+  auto_method: sentences
+  max_sentences: 15               # per rationale (in order); sentences under 4 words are skipped
+  max_claims: 8                   # claims method only
   generation:
     claims: {max_new_tokens: 512, temperature: 0.0, top_p: 1.0}
     verify: {max_new_tokens: 8, temperature: 0.0, top_p: 1.0}
@@ -472,6 +478,12 @@ E3_5:
       Text given with this image: {context}
       Statement about the image: "{claim}"
       Look at the image carefully. Is the statement true for this image? Answer with one word: true, false, or unclear.
+    # sentences method. Fields: {sentence} {question} {context}
+    verify_sentence: |-
+      Text given with this image: {context}
+      Question about the image: {question}
+      Sentence from a solution: "{sentence}"
+      Does this sentence state something about what the image shows (objects, text, colours, positions, highlighted regions, arrows, labels)? If it does not, answer: none. If it does, is that statement correct for this image? Answer with one word: correct, wrong, or none.
     # direct answer without the image: E3_1.prompts.direct is used, so the wording is identical to E3.1
   sheet:
     image_max_side: 900           # images embedded in the annotation sheet (JPEG)

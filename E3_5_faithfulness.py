@@ -67,7 +67,9 @@ from common.io_utils import append_jsonl, done_ids, read_jsonl
 from common.parsing import extract_choice
 
 EXP = "E3_5"
-LABELS = ["faithful", "minor", "unfaithful", "no_visual"]
+LABELS = ["faithful", "minor", "unfaithful", "no_visual"]          # human labels
+AUTO_LABELS = ["faithful", "visual_error", "no_visual"]            # automatic labels (cannot tell minor from unfaithful)
+HUMAN_TO_AUTO = {"faithful": "faithful", "minor": "visual_error", "unfaithful": "visual_error", "no_visual": "no_visual"}
 ERROR_TYPES = {
     "hallucinated": "mentions something that is not in the image",
     "misread": "wrong text, number or label read from the image",
@@ -176,19 +178,33 @@ def parse_claims(text: str, max_claims: int) -> tuple[list[dict], bool]:
 
 
 def parse_verdict(text: str) -> str:
-    m = re.search(r"\b(true|false|unclear|yes|no|uncertain|unknown)\b", (text or "").lower())
+    """-> true | false | none | unclear | unparsed"""
+    m = re.search(r"\b(correct|incorrect|wrong|true|false|none|unclear|yes|no|uncertain|unknown)\b", (text or "").lower())
     if not m:
         return "unparsed"
-    return {"yes": "true", "no": "false", "uncertain": "unclear", "unknown": "unclear"}.get(m.group(1), m.group(1))
+    return {"correct": "true", "yes": "true", "incorrect": "false", "wrong": "false", "no": "false",
+            "uncertain": "unclear", "unknown": "unclear"}.get(m.group(1), m.group(1))
 
 
-def auto_label(claims: list[dict]) -> str:
-    if not claims:
+def split_sentences(text: str, max_n: int, min_words: int = 4) -> list[str]:
+    """Sentences of a rationale: split at line breaks and sentence ends; list markers and markdown removed."""
+    out = []
+    for line in (text or "").splitlines():
+        line = re.sub(r"^\s*(?:[-*\u2022]|\d+[.)]|\(?[a-zA-Z]\))\s+", "", line)
+        line = line.replace("**", "").replace("\\(", "").replace("\\)", "").strip()
+        for sent in re.split(r"(?<=[.!?])\s+(?=[A-Z(\"])", line):
+            sent = sent.strip()
+            if len(re.findall(r"[A-Za-z0-9]+", sent)) >= min_words:
+                out.append(sent)
+    return out[:max_n]
+
+
+def auto_label(units: list[dict]) -> str:
+    """faithful | visual_error | no_visual, from the per-unit verdicts (true / false / none / unclear)."""
+    visual = [u for u in units if u.get("verdict") in ("true", "false")]
+    if not visual:
         return "no_visual"
-    false = [c for c in claims if c.get("verdict") == "false"]
-    if any(c.get("answer_depends") for c in false):
-        return "unfaithful"
-    return "minor" if false else "faithful"
+    return "visual_error" if any(u["verdict"] == "false" for u in visual) else "faithful"
 
 
 def stage_auto(cfg: dict, run_dir: Path, sample: list[dict], items: dict, vlm) -> None:
@@ -199,38 +215,44 @@ def stage_auto(cfg: dict, run_dir: Path, sample: list[dict], items: dict, vlm) -
     P = e["prompts"]
     gen = e["generation"]
 
-    # claims (text only)
-    path = run_dir / "claims.jsonl"
-    todo = [r for r in sample if r["id"] not in done_ids(path)]
-    if todo:
-        reqs = []
-        for r in todo:
-            it = items[r["id"]]
-            reqs.append(Request(_fill(P["claims"], question=it.question, context=it.context(), options=it.options_str(),
-                                      rationale=(r.get("rationale") or "").strip() or "N/A")))
-        outs = vlm.generate(reqs, GenParams.from_cfg(gen["claims"], seed), "claims")
-        rows = []
-        for r, o in zip(todo, outs):
-            claims, ok = parse_claims(o.text, int(e.get("max_claims", 8)))
-            rows.append({"id": r["id"], "raw": o.text, "finish": o.finish_reason, "parsed": ok, "claims": claims})
-        append_jsonl(path, rows)
-    claims = {r["id"]: r for r in read_jsonl(path)}
-
-    # verify each claim against the image (fresh call, no rationale)
+    method = e.get("auto_method", "sentences")
     path = run_dir / "verify.jsonl"
     todo = [r for r in sample if r["id"] not in done_ids(path)]
+    units: dict[str, list[dict]] = {}
+    if method == "claims" and todo:
+        # 1. the model lists the visual claims (text only)
+        cpath = run_dir / "claims.jsonl"
+        ctodo = [r for r in todo if r["id"] not in done_ids(cpath)]
+        if ctodo:
+            reqs = [Request(_fill(P["claims"], question=items[r["id"]].question, context=items[r["id"]].context(),
+                                  options=items[r["id"]].options_str(),
+                                  rationale=(r.get("rationale") or "").strip() or "N/A")) for r in ctodo]
+            outs = vlm.generate(reqs, GenParams.from_cfg(gen["claims"], seed), "claims")
+            rows = []
+            for r, o in zip(ctodo, outs):
+                cl, ok = parse_claims(o.text, int(e.get("max_claims", 8)))
+                rows.append({"id": r["id"], "raw": o.text, "finish": o.finish_reason, "parsed": ok, "claims": cl})
+            append_jsonl(cpath, rows)
+        claims = {r["id"]: r["claims"] for r in read_jsonl(cpath)}
+        units = {r["id"]: [{"text": c["claim"], "answer_depends": c["answer_depends"]} for c in claims[r["id"]]] for r in todo}
+        tmpl = lambda it, u: _fill(P["verify"], claim=u["text"], context=it.context())
+    elif todo:
+        n = int(e.get("max_sentences", 15))
+        units = {r["id"]: [{"text": t} for t in split_sentences(r.get("rationale") or "", n)] for r in todo}
+        tmpl = lambda it, u: _fill(P["verify_sentence"], sentence=u["text"], question=it.question, context=it.context())
     if todo:
+        # 2. each unit is checked against the image in a fresh call (no rationale, no answer)
         reqs, index = [], []
         for r in todo:
             it = items[r["id"]]
-            for k, c in enumerate(claims[r["id"]]["claims"]):
-                reqs.append(Request(_fill(P["verify"], claim=c["claim"], context=it.context()), it.image))
+            for k, u in enumerate(units[r["id"]]):
+                reqs.append(Request(tmpl(it, u), it.image))
                 index.append((r["id"], k))
-        outs = vlm.generate(reqs, GenParams.from_cfg(gen["verify"], seed), "verify") if reqs else []
-        res: dict[str, list] = {r["id"]: [dict(c) for c in claims[r["id"]]["claims"]] for r in todo}
+        outs = vlm.generate(reqs, GenParams.from_cfg(gen["verify"], seed), f"verify-{method}") if reqs else []
         for (iid, k), o in zip(index, outs):
-            res[iid][k].update(verdict=parse_verdict(o.text), verify_raw=o.text)
-        append_jsonl(path, [{"id": iid, "claims": cl, "auto_label": auto_label(cl)} for iid, cl in res.items()])
+            units[iid][k].update(verdict=parse_verdict(o.text), raw=o.text)
+        append_jsonl(path, [{"id": r["id"], "method": method, "units": units[r["id"]],
+                             "auto_label": auto_label(units[r["id"]])} for r in todo])
 
     # direct answer without the image (E3.1's direct prompt)
     path = run_dir / "noimg.jsonl"
@@ -318,6 +340,7 @@ details{margin-top:10px}.done{color:var(--ok)}.todo{color:var(--warn)}
 <li><b>minor</b>: some statement about the image is wrong or not in the image, but the answer does not rest on it.</li>
 <li><b>unfaithful</b>: a statement the answer rests on is wrong or not in the image. The answer is right for an unsupported reason.</li>
 <li><b>no visual claim</b>: the rationale says nothing specific about the image. Then record whether the question needs the image.</li></ol>
+<p>Separately, tick <b>"does not arrive at the correct option"</b> when the rationale argues for a different option, says none of the options fits, or hedges. The answer step still picked the right letter.</p>
 <p>Statements taken from the context text count as supported if the context says them. When unsure whether something is in the image, zoom the image (open it in a new tab) before deciding.</p>
 <p>Labels are saved in this browser automatically. <b>Export</b> when done (or to back up) and copy the file into the run's <code>labels/</code> folder.</p></details></div>
 <main><section class="card" id="left"></section><section class="card" id="right"></section></main>
@@ -340,12 +363,13 @@ document.getElementById('right').innerHTML=`<div class="muted">Model rationale (
 ${['yes','no'].map(v=>`<label class="choice"><input type="radio" name="need" value="${v}" ${L.image_needed===v?'checked':''}> ${v}</label>`).join('')}</div>
 <div id="errs" style="display:${['minor','unfaithful'].includes(L.verdict)?'block':'none'}"><p class="muted">Error type(s)</p>
 ${Object.entries(D.errors).map(([k,v])=>`<label class="choice"><input type="checkbox" name="err" value="${k}" ${(L.errors||[]).includes(k)?'checked':''}> ${esc(v)}</label>`).join('')}</div>
+<label class="choice"><input type="checkbox" id="nosup" ${L.no_support?'checked':''}> The rationale itself does <b>not</b> arrive at the correct option (argues for another option or for none, or hedges)</label>
 <p class="muted">Note (which statement is wrong, what the image shows)</p><textarea id="note">${esc(L.note||'')}</textarea>
 ${it.solution?`<details><summary class="muted">ScienceQA reference solution</summary><p class="rat">${esc(it.solution)}</p></details>`:''}`;
 document.querySelectorAll('#right input,#note').forEach(el=>el.addEventListener('input',collect));prog()}
 function collect(){const it=D.items[i];const v=(document.querySelector('input[name=v]:checked')||{}).value;
 const L={verdict:v,image_needed:(document.querySelector('input[name=need]:checked')||{}).value||'',
-errors:[...document.querySelectorAll('input[name=err]:checked')].map(e=>e.value),note:document.getElementById('note').value};
+errors:[...document.querySelectorAll('input[name=err]:checked')].map(e=>e.value),no_support:document.getElementById('nosup').checked,note:document.getElementById('note').value};
 if(v!=='no_visual')L.image_needed='';if(!['minor','unfaithful'].includes(v))L.errors=[];
 S.labels[it.id]=L;save();document.getElementById('need').style.display=v==='no_visual'?'block':'none';
 document.getElementById('errs').style.display=['minor','unfaithful'].includes(v)?'block':'none';prog()}
@@ -413,26 +437,32 @@ def analyze(cfg: dict, run_dir: Path) -> dict:
     info = json.loads((run_dir / "sample_info.json").read_text()) if (run_dir / "sample_info.json").exists() else {}
 
     summ: dict = {"n": len(ids), "source": info}
+    U = {i: (V[i].get("units") or V[i].get("claims") or []) for i in V}   # older runs stored "claims"
+    auto: dict[str, str] = {}
 
     # ---- automatic pass
     if V:
-        auto = {i: V[i]["auto_label"] for i in ids if i in V}
-        verdicts = Counter(c.get("verdict") for i in auto for c in V[i]["claims"])
-        n_claims = [len(V[i]["claims"]) for i in auto]
+        auto = {i: auto_label(U[i]) for i in ids if i in V}   # recomputed: older runs used other label names
+        verdicts = Counter(u.get("verdict") for i in auto for u in U[i])
+        n_units = [len(U[i]) for i in auto]
+        n_visual = [sum(u.get("verdict") in ("true", "false") for u in U[i]) for i in auto]
+        method = next((V[i].get("method") for i in auto if V[i].get("method")), "claims")
         summ["auto"] = {
-            "labels": {l: _rate([auto[i] == l for i in auto], alpha) for l in LABELS},
-            "claims_per_item": sum(n_claims) / len(n_claims) if n_claims else float("nan"),
-            "claim_verdicts": dict(verdicts),
-            "claims_parse_failed": sum(not C[i]["parsed"] for i in auto if i in C),
-            "claims_truncated": sum(C[i].get("finish") == "length" for i in auto if i in C),
+            "method": method,
+            "labels": {l: _rate([auto[i] == l for i in auto], alpha) for l in AUTO_LABELS},
+            "units_per_item": sum(n_units) / len(n_units) if n_units else float("nan"),
+            "visual_units_per_item": sum(n_visual) / len(n_visual) if n_visual else float("nan"),
+            "verdicts": dict(verdicts),
         }
+        if method == "claims" and C:
+            summ["auto"]["claims_parse_failed"] = sum(not C[i]["parsed"] for i in auto if i in C)
     if NI:
         summ["noimg"] = {"correct": _rate([NI[i]["correct"] for i in ids if i in NI], alpha)}
     missed = []
     if V:
         # Cross-check of the claim extractor: rationales with no extracted claim that still refer to the image
         rx = re.compile(e["analysis"].get("mentions_image_regex") or r"\bimage\b", re.IGNORECASE)
-        none = [i for i in ids if i in V and not V[i]["claims"]]
+        none = [i for i in ids if i in V and auto[i] == "no_visual"]
         missed = [i for i in none if rx.search(S[i].get("rationale") or "")]
         summ["auto"]["no_claims_but_mentions_image"] = _rate([i in missed for i in none], alpha)
         summ["auto"]["rationale_mentions_image"] = _rate([bool(rx.search(S[i].get("rationale") or "")) for i in ids], alpha)
@@ -459,6 +489,9 @@ def analyze(cfg: dict, run_dir: Path) -> dict:
                                                for i in ann], alpha),
             "with_visual_claims": _rate([lab[i] == "unfaithful" for i in ann if lab[i] != "no_visual"], alpha),
             "error_types": dict(Counter(t for i in ann for t in L[i].get("errors") or [])),
+            # the rationale itself argues for another option, for none, or hedges; stage 2 still answered correctly
+            "rationale_not_supporting_answer": _rate([bool(L[i].get("no_support")) for i in ann], alpha),
+            "unfaithful_or_not_supporting": _rate([lab[i] == "unfaithful" or bool(L[i].get("no_support")) for i in ann], alpha),
         }
         # breakdowns
         splits = {
@@ -482,9 +515,9 @@ def analyze(cfg: dict, run_dir: Path) -> dict:
         # automatic judge vs human
         if V:
             both = [i for i in ann if i in V]
-            a = [V[i]["auto_label"] for i in both]
-            h = [lab[i] for i in both]
-            cm = {hl: {al: sum(1 for x, y in zip(h, a) if x == hl and y == al) for al in LABELS} for hl in LABELS}
+            a = [auto[i] for i in both]
+            h = [HUMAN_TO_AUTO[lab[i]] for i in both]
+            cm = {hl: {al: sum(1 for i in both if lab[i] == hl and auto[i] == al) for al in AUTO_LABELS} for hl in LABELS}
 
             def _bin(pos):
                 tp = sum((x in pos) and (y in pos) for x, y in zip(h, a))
@@ -496,16 +529,16 @@ def analyze(cfg: dict, run_dir: Path) -> dict:
 
             summ["judge_vs_human"] = {
                 "n": len(both),
-                "agreement": sum(x == y for x, y in zip(h, a)) / len(both) if both else float("nan"),
-                "kappa_4way": cohen_kappa(h, a),
-                "unfaithful": _bin({"unfaithful"}),
-                "any_error": _bin({"minor", "unfaithful"}),
+                "agreement_3way": sum(x == y for x, y in zip(h, a)) / len(both) if both else float("nan"),
+                "kappa_3way": cohen_kappa(h, a),
+                "visual_error": _bin({"visual_error"}),
+                "has_visual_claim": _bin({"faithful", "visual_error"}),
                 "confusion_human_rows_auto_cols": cm,
             }
             for i in both:
-                if V[i]["auto_label"] != lab[i]:
-                    disagreements.append({"id": i, "human": lab[i], "auto": V[i]["auto_label"], "note": L[i].get("note"),
-                                          "rationale": S[i].get("rationale"), "claims": V[i]["claims"]})
+                if auto[i] != HUMAN_TO_AUTO[lab[i]]:
+                    disagreements.append({"id": i, "human": lab[i], "auto": auto[i], "note": L[i].get("note"),
+                                          "rationale": S[i].get("rationale"), "units": U[i]})
 
         # inter-annotator agreement
         others = {k: v for k, v in H.items() if k != primary}
@@ -518,15 +551,18 @@ def analyze(cfg: dict, run_dir: Path) -> dict:
                     "kappa_4way": cohen_kappa([lab[i] for i in both], [v[i]["verdict"] for i in both]),
                     "kappa_unfaithful": cohen_kappa([lab[i] == "unfaithful" for i in both],
                                                     [v[i]["verdict"] == "unfaithful" for i in both]),
+                    "kappa_no_support": cohen_kappa([bool(L[i].get("no_support")) for i in both],
+                                                    [bool(v[i].get("no_support")) for i in both]),
                 }
 
         for i in ann:
-            if lab[i] in ("unfaithful", "minor"):
-                examples.append({"id": i, "label": lab[i], "errors": L[i].get("errors"), "note": L[i].get("note"),
+            if lab[i] in ("unfaithful", "minor") or L[i].get("no_support"):
+                examples.append({"id": i, "label": lab[i], "no_support": bool(L[i].get("no_support")),
+                                 "errors": L[i].get("errors"), "note": L[i].get("note"),
                                  "subject": S[i].get("subject"), "topic": S[i].get("topic"),
                                  "rationale": S[i].get("rationale"),
-                                 "auto_label": V.get(i, {}).get("auto_label"),
-                                 "auto_claims": V.get(i, {}).get("claims")})
+                                 "auto_label": auto.get(i) if V else None,
+                                 "auto_units": U.get(i)})
 
     # ---- files
     no_claims = [{"id": i, "subject": S[i].get("subject"), "topic": S[i].get("topic"), "rationale": S[i].get("rationale")}
@@ -540,11 +576,14 @@ def analyze(cfg: dict, run_dir: Path) -> dict:
     with open(run_dir / "per_item.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         names = sorted(H)
-        w.writerow(["id", "subject", "topic", "stated", "n_claims", "auto_label", "noimg_correct"] + [f"human_{n}" for n in names])
+        w.writerow(["id", "subject", "topic", "stated", "n_units", "n_visual_units", "auto_label", "noimg_correct"]
+                   + [f"human_{n}" for n in names] + [f"no_support_{n}" for n in names])
         for i in ids:
             w.writerow([i, S[i].get("subject"), S[i].get("topic"), bool(S[i].get("rationale_stated_answer")),
-                        len(V[i]["claims"]) if i in V else "", V.get(i, {}).get("auto_label", ""),
-                        NI.get(i, {}).get("correct", "")] + [H[n].get(i, {}).get("verdict", "") for n in names])
+                        len(U[i]) if i in U else "", sum(u.get("verdict") in ("true", "false") for u in U.get(i, [])) if i in U else "",
+                        auto.get(i, "") if V else "", NI.get(i, {}).get("correct", "")]
+                       + [H[n].get(i, {}).get("verdict", "") for n in names]
+                       + [bool(H[n].get(i, {}).get("no_support")) if i in H[n] else "" for n in names])
 
     dump_json(summ, run_dir / "summary.json")
     (run_dir / "summary.md").write_text(render_md(summ, examples, int(e["analysis"].get("examples", 15))), encoding="utf-8")
@@ -569,7 +608,9 @@ def render_md(s: dict, examples: list, n_ex: int) -> str:
               f"| any wrong visual statement (minor + unfaithful) | {_p(h['any_visual_error'])} |",
               f"| no visual claim although the question needs the image (ungrounded) | {_p(h['ungrounded'])} |",
               f"| unfaithful or ungrounded | {_p(h['unfaithful_or_ungrounded'])} |",
-              f"| unfaithful, among rationales with visual claims | {_p(h['with_visual_claims'])} |", "",
+              f"| unfaithful, among rationales with visual claims | {_p(h['with_visual_claims'])} |",
+              f"| the rationale does not arrive at the correct option (another option, none, or hedges) | {_p(h['rationale_not_supporting_answer'])} |",
+              f"| unfaithful, or the rationale does not support the answer | {_p(h['unfaithful_or_not_supporting'])} |", "",
               "| label | rate |", "|---|---|"] + [f"| {l} | {_p(h['labels'][l])} |" for l in LABELS] + [""]
         if h["error_types"]:
             L += ["Error types (minor + unfaithful items; several per item possible): "
@@ -580,40 +621,42 @@ def render_md(s: dict, examples: list, n_ex: int) -> str:
             L.append("")
         for k, v in (s.get("inter_annotator") or {}).items():
             L.append(f"Inter-annotator ({s['primary_annotator']} vs {k}, n = {v['n']}): κ = {v['kappa_4way']:.2f} (4 labels), "
-                     f"κ = {v['kappa_unfaithful']:.2f} (unfaithful vs not)")
+                     f"κ = {v['kappa_unfaithful']:.2f} (unfaithful vs not), κ = {v['kappa_no_support']:.2f} (does not support the answer)")
         L.append("")
     else:
         L += ["## Human labels", "", "None yet: open `annotation_sheet.html`, label the items, export, and copy the file into `labels/`.", ""]
 
     a = s.get("auto")
     if a:
-        L += ["## Automatic judge (the same model checks its own claims against the image)", "",
-              "| label | rate |", "|---|---|"] + [f"| {l} | {_p(a['labels'][l])} |" for l in LABELS]
-        L += ["", f"Visual claims per rationale: {a['claims_per_item']:.2f} · claim verdicts: "
-              + ", ".join(f"{k} {v}" for k, v in sorted(a["claim_verdicts"].items(), key=lambda kv: str(kv[0])))
-              + f" · claim lists not parsed: {a['claims_parse_failed']} · truncated: {a['claims_truncated']}", ""]
+        how = ("every sentence of the rationale is checked against the image" if a["method"] == "sentences"
+               else "the model lists its visual claims, then each is checked against the image")
+        L += [f"## Automatic check (the same model; {how})", "",
+              "| label | rate |", "|---|---|"] + [f"| {l} | {_p(a['labels'][l])} |" for l in AUTO_LABELS]
+        L += ["", f"Units checked per rationale: {a['units_per_item']:.2f}, of which about the image: {a['visual_units_per_item']:.2f} · verdicts: "
+              + ", ".join(f"{k} {v}" for k, v in sorted(a["verdicts"].items(), key=lambda kv: str(kv[0]))), ""]
         if "no_claims_but_mentions_image" in a:
-            L += [f"Extractor cross-check: rationales that refer to the image (word list) {_p(a['rationale_mentions_image'])}; "
-                  f"of the rationales with **no** extracted claim, {_p(a['no_claims_but_mentions_image'])} still refer to it "
-                  "(listed in `no_claims_but_mentions_image.jsonl`: possible missed claims).", ""]
+            L += [f"Cross-check: rationales that refer to the image (word list) {_p(a['rationale_mentions_image'])}; "
+                  f"of those labelled no_visual, {_p(a['no_claims_but_mentions_image'])} still refer to it "
+                  "(`no_claims_but_mentions_image.jsonl`).", ""]
     if s.get("noimg"):
         L += [f"Answered correctly **without** the image (E3.1 direct prompt): {_p(s['noimg']['correct'])}", ""]
     j = s.get("judge_vs_human")
     if j:
-        L += [f"## Automatic judge vs human (n = {j['n']})", "",
-              f"Exact agreement {100 * j['agreement']:.1f}% · κ (4 labels) = {j['kappa_4way']:.2f}", "",
+        L += [f"## Automatic check vs human (n = {j['n']}; human minor + unfaithful = visual_error)", "",
+              f"Exact agreement {100 * j['agreement_3way']:.1f}% · κ (3 labels) = {j['kappa_3way']:.2f}", "",
               "| target | precision | recall | κ |", "|---|---|---|---|",
-              f"| unfaithful | {j['unfaithful']['precision']:.2f} | {j['unfaithful']['recall']:.2f} | {j['unfaithful']['kappa']:.2f} |",
-              f"| any error | {j['any_error']['precision']:.2f} | {j['any_error']['recall']:.2f} | {j['any_error']['kappa']:.2f} |", "",
-              "| human \\ auto | " + " | ".join(LABELS) + " |", "|---|" + "---|" * len(LABELS)]
-        L += [f"| {hl} | " + " | ".join(str(j["confusion_human_rows_auto_cols"][hl][al]) for al in LABELS) + " |" for hl in LABELS]
+              f"| visual error | {j['visual_error']['precision']:.2f} | {j['visual_error']['recall']:.2f} | {j['visual_error']['kappa']:.2f} |",
+              f"| has a visual claim | {j['has_visual_claim']['precision']:.2f} | {j['has_visual_claim']['recall']:.2f} | {j['has_visual_claim']['kappa']:.2f} |", "",
+              "| human \\ auto | " + " | ".join(AUTO_LABELS) + " |", "|---|" + "---|" * len(AUTO_LABELS)]
+        L += [f"| {hl} | " + " | ".join(str(j["confusion_human_rows_auto_cols"][hl][al]) for al in AUTO_LABELS) + " |" for hl in LABELS]
         L.append("")
-    ex = [x for x in examples if x["label"] == "unfaithful"][:n_ex]
+    ex = [x for x in examples if x["label"] == "unfaithful" or x.get("no_support")][:n_ex]
     if ex:
-        L += ["## Unfaithful-but-correct examples", ""]
+        L += ["## Unfaithful-but-correct examples (unfaithful, or the rationale does not support the answer)", ""]
         for x in ex:
             rat = (x["rationale"] or "").strip().replace("\n", " ")
-            L += [f"- **{x['id']}** ({x['subject']} / {x['topic']}; {', '.join(x['errors'] or []) or '—'}): {x['note'] or ''}",
+            tag = x["label"] + (", does not support the answer" if x.get("no_support") else "")
+            L += [f"- **{x['id']}** ({tag}; {x['subject']} / {x['topic']}; {', '.join(x['errors'] or []) or '—'}): {x['note'] or ''}",
                   f"  > {rat[:400]}{'…' if len(rat) > 400 else ''}"]
         L.append("")
     L.append("Files: `per_item.csv`, `unfaithful_examples.jsonl`, `disagreements.jsonl` (automatic vs human), "
